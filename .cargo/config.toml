@@ -1,0 +1,22 @@
+[build]
+target = "armv6zk-none-eabihf.json"
+
+[target.armv6zk-none-eabihf]
+rustflags = [
+    "-C", "link-arg=-z noexecstack",
+    "-C", "link-arg=--gc-sections",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-Tmemory.ld",
+    "-C", "link-arg=--fix-arm1176",
+    "-C", "link-arg=--use-blx",
+]
+runner = "./upload.sh"
+linker = "arm-none-eabi-ld"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[profile]
+dev.panic = "abort"
+release.panic = "abort"

@@ -1,0 +1,15 @@
+[package]
+name = "crab-pi"
+version = "0.1.0"
+edition = "2024"
+
+# Note: this exists to silence false positive errors when using an LSP or IDE
+# `name` needs to be the same as `package.name`
+[[bin]]
+name = "crab-pi"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]

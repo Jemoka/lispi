@@ -1,0 +1,44 @@
+{
+  "llvm-target": "armv6zk-none-eabihf",
+  "metadata": {
+    "description": "For arm1176jzf-s",
+    "host_tools": null,
+    "std": null,
+    "tier": null
+  },
+  "abi": "eabihf",
+  "arch": "arm",
+  "target-pointer-width": 32,
+  "target-c-int-width": 32,
+  "features": "+v6,+vfp2,-d32,-neon,+strict-align,+armv6kz,+atomics-32,+v6k,+read-tp-tpidruro",
+  "data-layout": "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64",
+  "c-enum-min-bits": 8,
+  "linker-flavor": "gcc",
+  "linker": "arm-none-eabi-gcc",
+  "pre-link-args": {
+    "gcc": [
+      "-Wall",
+      "-nostdlib",
+      "-nostartfiles",
+      "-ffreestanding",
+      "-march=armv6zk"
+    ]
+  },
+  "executables": true,
+  "relocation-model": "static",
+  "panic-strategy": "abort",
+  "disable-redzone": true,
+  "min-atomic-width": 8,
+  "max-atomic-width": 64,
+  "atomic-cas": true,
+  "crt-objects-fallback": "false",
+  "emit-debug-gdb-scripts": false,
+  "asm-args": [
+    "-march=armv6zk",
+    "-mlittle-endian",
+    "-mfloat-abi=hard"
+  ],
+  "llvm-floatabi": "hard"
+}
+
+
