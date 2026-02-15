@@ -8,12 +8,13 @@ rustflags = [
     "-C", "link-arg=-nostdlib",
     "-C", "link-arg=-Tmemory.ld",
     "-C", "link-arg=--fix-arm1176",
-    "-C", "link-arg=--use-blx",
+    "-C", "link-arg=--use-blx"
 ]
 runner = "./upload.sh"
 linker = "arm-none-eabi-ld"
 
 [unstable]
+json-target-spec = true
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
 

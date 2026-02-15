@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
 
-mod arch;
-mod llvm_infra;
-mod panic_infra;
-mod print;
-mod start;
-mod uart;
-mod watchdog;
+mod comm;
+mod boot;
+mod utils;
+
+use heapless::Vec;
+use utils::bits::bit_set;
 
 fn main() {
-    uart::init();
-    println!("Hello from Rust on the Pi!");
+    let mut xs: Vec<u8, 8> = Vec::new();
+    xs.push(8).unwrap();
+
+    println!("eyo {}", bit_set(0, 2));
 }

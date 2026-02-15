@@ -9,7 +9,7 @@ const COMMON_PASSWORD: u32 = 0x5a00_0000;
 const RSTC_FULL_RESET: u32 = 0x0000_0020;
 
 pub extern "C" fn restart() -> ! {
-    crate::arch::dsb();
+    crate::utils::memory::dsb();
 
     unsafe {
         BCM_PWR_MAN_BASE

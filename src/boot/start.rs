@@ -9,8 +9,8 @@ unsafe extern "C" {
 }
 
 extern "C" fn __kernel_start() -> ! {
-    crate::main();
-    crate::watchdog::restart();
+    crate::boot::entrypoint::entrypoint();
+    crate::utils::watchdog::restart();
 }
 
 // This copies what staff-start.S does:
@@ -65,5 +65,5 @@ _start:
     BSS_END = sym __bss_end__,
     STACK_INIT = sym __stack_init__,
     KERNEL_START = sym self::__kernel_start,
-    RESTART = sym crate::watchdog::restart,
+    RESTART = sym crate::utils::watchdog::restart,
 );
