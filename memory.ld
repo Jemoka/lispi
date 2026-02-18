@@ -9,6 +9,7 @@ __DRAM_END   = 0x20000000;
 ENTRY(_start)
 PROVIDE(__stack_init__ = __STACK_INIT);
 PROVIDE(__dram_end__ = __DRAM_END);
+PROVIDE(__heap_end__ = __dram_end__);
 
 SECTIONS {
     .text __BOOTLOADER_LOAD_ADDR : {

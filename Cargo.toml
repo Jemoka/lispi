@@ -1,5 +1,5 @@
 [package]
-name = "crab-pi"
+name = "lispi"
 version = "0.1.0"
 edition = "2024"
 
@@ -15,3 +15,6 @@ bench = false
 [dependencies]
 heapless = "0.9.2"
 bytemuck = "1.25.0"
+embedded-alloc = "0.7.0"
+critical-section = { version = "1.1", default-features = false, features = ["restore-state-u32"] }
+proc-bitfield = "0.5.3"

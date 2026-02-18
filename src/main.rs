@@ -4,13 +4,15 @@
 mod comm;
 mod boot;
 mod utils;
+mod cs;
+mod regs;
 
-use heapless::Vec;
-use utils::bits::bit_set;
+extern crate alloc;
+use alloc::collections::BTreeMap;
 
 fn main() {
-    let mut xs: Vec<u8, 8> = Vec::new();
-    xs.push(8).unwrap();
-
-    println!("eyo {}", bit_set(0, 2));
+    let mut v = BTreeMap::new();
+    v.insert(2,3);
+    println!("eyo {:?}", v[&2]);
 }
+
