@@ -6,7 +6,7 @@ edition = "2024"
 # Note: this exists to silence false positive errors when using an LSP or IDE
 # `name` needs to be the same as `package.name`
 [[bin]]
-name = "crab-pi"
+name = "lispi"
 path = "src/main.rs"
 test = false
 doctest = false

@@ -1,5 +1,5 @@
 //! CPSR / SPSR register support for ARMv6 rpi
-use proc_bitfield::{bitfield, ConvRaw};
+use proc_bitfield::{ConvRaw, bitfield};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ConvRaw)]
 pub enum Mode {
@@ -63,4 +63,3 @@ impl PSR {
         }
     }
 }
-

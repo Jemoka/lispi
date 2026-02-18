@@ -32,7 +32,6 @@ pub fn init_heap() {
     let heap = unsafe { core::slice::from_raw_parts_mut(heap_start, size) };
 
     unsafe { HEAP.init(heap.as_mut_ptr() as usize, heap.len()) }
-    
 }
 
 //// barriers ////
@@ -56,7 +55,7 @@ pub fn dmb() {
 /// Remember to potentially use DMB if you write across devices
 #[inline(always)]
 #[allow(dead_code)]
-pub fn put32(addr: usize, value: u32) {
+pub unsafe fn put32(addr: usize, value: u32) {
     unsafe { ::core::ptr::write_volatile(addr as *mut u32, value) }
 }
 
@@ -64,7 +63,6 @@ pub fn put32(addr: usize, value: u32) {
 /// Remember to potentially use DMB if you write across devices
 #[inline(always)]
 #[allow(dead_code)]
-pub fn get32(addr: usize) -> u32 {
+pub unsafe fn get32(addr: usize) -> u32 {
     unsafe { ::core::ptr::read_volatile(addr as *const u32) }
 }
-

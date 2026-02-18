@@ -1,7 +1,7 @@
-use crate::println;
 use crate::comm::uart;
+use crate::println;
 use crate::utils::memory;
-    
+
 pub fn entrypoint() {
     uart::init();
     // initialize memory
