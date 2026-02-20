@@ -1,6 +1,7 @@
 //! CPSR / SPSR register support for ARMv6 rpi
 use proc_bitfield::{ConvRaw, bitfield};
 
+#[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ConvRaw)]
 pub enum Mode {
     User = 0b10000,
@@ -9,7 +10,7 @@ pub enum Mode {
     Supervisor = 0b10011,
     Abort = 0b10111,
     Undefined = 0b11011,
-    System = 0b11111,
+    System = 0b11111
 }
 
 bitfield! {
