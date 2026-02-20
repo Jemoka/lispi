@@ -70,17 +70,21 @@ pub unsafe fn get32(addr: usize) -> u32 {
 //// flushes ////
 #[allow(unused)]
 pub fn prefetch_flush() {
-    unsafe {core::arch::asm!("mcr p15, 0, {t}, c7, c5, 4", t = in(reg) 0);}
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {t}, c7, c5, 4", t = in(reg) 0);
+    }
 }
 
 #[macro_export]
 macro_rules! prefetch_flush {
     ($donate:tt) => {
         concat!(
-            "mov ", stringify!($donate), ", #0\n",
-            "mcr p15, 0, ", stringify!($donate), ", c7, c5, 4"
+            "mov ",
+            stringify!($donate),
+            ", #0\n",
+            "mcr p15, 0, ",
+            stringify!($donate),
+            ", c7, c5, 4"
         )
     };
 }
-
-

@@ -1,141 +1,241 @@
 //! threading management system
 
-use heapless::Vec;
+use alloc::collections::VecDeque;
+use alloc::vec;
 use core::cell::SyncUnsafeCell;
+use core::mem::ManuallyDrop;
 
 use crate::println;
-use crate::regs::banked::{get_registers_asm, set_registers_asm, Regs};
-use crate::regs::cpsr::{PSR, Mode};
+use crate::swi;
+use crate::utils::psr::{Mode, PSR};
 
-const MAX_THREADS: usize = 16;
-const DEFAULT_STACK_SIZE: usize = 1024;
+const STACK_SIZE: usize = 1024;
 
-#[repr(align(8))]
-struct Stack(pub Vec<u32, DEFAULT_STACK_SIZE>);
-
-struct ThreadControlBlock {
-    stack: Stack,
-    regs: [usize; 16], // All Registers
-    cpsr: u32,
-    dead: bool,
+#[repr(C)]
+#[derive(Debug, Clone)]
+struct Context {
+    r0: u32,
+    r1: u32,
+    r2: u32,
+    r3: u32,
+    r4: u32,
+    r5: u32,
+    r6: u32,
+    r7: u32,
+    r8: u32,
+    r9: u32,
+    r10: u32,
+    r11: u32,
+    r12: u32,
+    sp: u32,   // user's sp; 13
+    lr: u32,   // user's lr; 14
+    pc: u32,   // exception's model's pc
+    spsr: u32, // exception's model's cpsr, which we will restore into the user's cpsr when we rfe to the user
 }
-
-impl ThreadControlBlock {
+impl Default for Context {
     fn default() -> Self {
-        let mut m = Self {
-            stack: Stack(Vec::new()),
-            regs: [
-                0, // r0
-                0, // r1
-                0, // r2
-                0, // r3
-                0, // r4
-                0, // r5
-                0, // r6
-                0, // r7
-                0, // r8
-                0, // r9
-                0, // r10
-                0, // r11
-                0, // r12
-                0, // sp
-                0, // lr
-                (thread_start_execution) as *const () as usize, // pc
-            ],
-            dead: false,
-            cpsr: PSR::from(0).with_mode(Mode::User).into()
-        };
-        m
+        Self {
+            r0: 0,
+            r1: 0,
+            r2: 0,
+            r3: 0,
+            r4: 0,
+            r5: 0,
+            r6: 0,
+            r7: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            sp: 0,
+            lr: 0,
+            pc: 0,
+            spsr: PSR::from(0).with_mode(Mode::User).into(),
+        }
     }
 }
 
-static THREAD_CONTROL_BLOCK: SyncUnsafeCell<Vec<ThreadControlBlock, MAX_THREADS>> = SyncUnsafeCell::new(Vec::new());
-static CURRENT_THREAD: SyncUnsafeCell<Option<u32>> = SyncUnsafeCell::new(None);
+#[repr(C)]
+#[derive(Debug)]
+struct ThreadControlBlock {
+    stack: *mut u32,
+    regs: Context, // All Registers + CPSR
+}
 
+impl Default for ThreadControlBlock {
+    fn default() -> Self {
+        Self {
+            stack: core::ptr::null_mut(),
+            regs: Context::default(),
+        }
+    }
+}
+
+//  stack ptr is leaked so and each thread is effectively a critical section
+unsafe impl Sync for ThreadControlBlock {}
+unsafe impl Send for ThreadControlBlock {}
+
+static THREAD_CONTROL_BLOCKS: SyncUnsafeCell<VecDeque<ThreadControlBlock>> =
+    SyncUnsafeCell::new(VecDeque::new());
+static SYSTEM_THREAD: SyncUnsafeCell<Option<ThreadControlBlock>> = SyncUnsafeCell::new(None);
+
+/// ASSUMES: SUPER mode
+/// get a pointer into the regs array, and:
+/// 1. restore all registers up to lr
+/// 2. rfe to the pc and cpsr
+#[unsafe(naked)]
+extern "C" fn thread_dispatch_asm(regs: &Context) {
+    core::arch::naked_asm!(
+        "mov lr, r0", // load the address of the regs array into lr, which we can trash since we are in execption
+        "ldm lr, {{r0-r14}}^", // restore all registers up to lr into user mode!
+        "add lr, lr, #60", // set offset to the pc and cpsr, which are the last two elements of the regs array
+        "rfe lr",          // and then rfe to the pc and cpsr, which will jump to the new thread
+    );
+}
+
+/// ASSUMES: SUPER mode
+/// dispatch to the next thread by loading its context and rfeing to it
+extern "C" fn thread_dispatch() {
+    unsafe {
+        let tcbs = &mut *THREAD_CONTROL_BLOCKS.get();
+        let next_thread: &ThreadControlBlock = tcbs.front().unwrap();
+        thread_dispatch_asm(&next_thread.regs);
+    }
+}
+
+/// ASSUMES: SUPER mode
 /// create a new thread and push it to the thread control block
+/// do brain surgery to set up the stack and registers so that when
+/// the thread is dispatched it will start executing at the entrypoint
+/// and then jump to the thread end trampoline when it returns
 pub fn thread_push(entrypoint: extern "C" fn()) {
-    // if no one is the curret thread, set us to it
-    if unsafe { (*CURRENT_THREAD.get()).is_none() } {
-        unsafe {
-            *CURRENT_THREAD.get() = Some(0);
-        }
-    }
-    
     let mut tcb = ThreadControlBlock::default();
-    // because the thread will start executing at the entrypoint, we need to set the pc to the entrypoint
-    // once it returns we want it to jump to the thread end trampoline
-    tcb.regs[0] = entrypoint as usize;
+    // allocate a stack for the thread
+    let stack = vec![0u32; STACK_SIZE].into_boxed_slice();
+    // TODO! we don't handle deallocation. cosmic rays or PG&E will
+    let mut stack_ptr = ManuallyDrop::new(stack).as_mut_ptr();
+    stack_ptr = stack_ptr.wrapping_add(STACK_SIZE); // move the stack pointer to the top of the stack
+
+    // the start of a thread is actually a trampoline which sets up the thread
+    // and then jumps to it, ensuring control returns to us instead of user at the end
+    // it takes two arguments, function pointer and the ID of the thread
     unsafe {
-        let v = &mut *THREAD_CONTROL_BLOCK.get();
-        v.push(tcb).unwrap();
-        // TODO!!! get id, move into final storage FIRST, and then
-        // set up registers + stack 
+        let tcbs = &mut *THREAD_CONTROL_BLOCKS.get();
 
+        tcb.regs.r0 = entrypoint as u32;
+        tcb.regs.sp = stack_ptr as u32;
+        tcb.regs.pc = thread_start_trampoline as *const () as u32; // set the pc to the trampoline, which will jump to the entrypoint
 
-
-        tcb.regs[1] = (&*THREAD_CONTROL_BLOCK.get()).len();
+        tcbs.push_back(tcb);
     }
 }
 
-/// called when threads begin execution
-extern "C" fn thread_start_execution(entrypoint: extern "C" fn(), id: usize) {
-    println!("BEGIN THREAD");
-    entrypoint();
-    thread_end_trampoline(id);
+/// ASSUMES: SUPER mode
+/// context switch!
+extern "C" fn thread_context_switch_do(current_context: &'static Context) {
+    unsafe {
+        // and finally do the context switch by finding the next thread and dispatching to it
+        let tcbs = &mut *THREAD_CONTROL_BLOCKS.get();
+        let mut current_thread = tcbs.pop_front().unwrap(); // get the current thread, which is at the front of the queue
+
+        // gather context
+        current_thread.regs = current_context.clone(); // update the current thread's context with the gathered context
+
+        // push the current thread to the back of the queue
+        tcbs.push_back(current_thread);
+
+        // and then dispatch to the next thread, which is now at the front of the queue
+        thread_dispatch();
+    }
 }
 
-/// called when threads finish execution
-extern "C" fn thread_end_trampoline(id: usize) {
-    println!("END THREAD");
-    unsafe {
-        (&mut *THREAD_CONTROL_BLOCK.get())[id].dead = true;
-    }
-
-    // if everything is dead, print and panic
-    let all_dead = unsafe {
-        let tcb = &*THREAD_CONTROL_BLOCK.get();
-        tcb.iter().all(|t| t.dead)
-    };
-    if all_dead {
-        println!("ALL THREADS DEAD");
-        panic!("ALL THREADS DEAD");
-    }
-
-    // context switch to the next thread
-    thread_context_switch();
+/// ASSUMES: SUPER mode
+/// capture state and then context switch!
+#[unsafe(naked)]
+pub extern "C" fn thread_context_switch() {
+    core::arch::naked_asm!(
+        "sub r0, sp, #68", // make space for the context on the stack; 17 registers * 4 bytes each = 68 bytes
+        "stmia r0, {{r0-r14}}^",
+        "str lr, [r0, #60]", // store the USER pc at the end of the context; which is the lr in exception mode
+        "mrs r1, spsr", // store the user's cpsr at the end of the context
+        "str r1, [r0, #64]", // store the USER cpsr at the end of the context
+        "b {handler}", // call the context switch handler
+        handler = sym thread_context_switch_do
+    );
 }
 
-
-/// context switch
-extern "C" fn thread_context_switch() {
-    let regs = get_registers_asm();
-    // after this point we can't trust any of our pointers
-    // because the rest of this is not a naked function and thus
-    // nukes the fuck out of PC, LD, SP, etc.
+/// ASSUMES: SUPER mode
+/// kill current thread and context switch to the next one
+pub extern "C" fn thread_done() {
     unsafe {
-        let id = (*CURRENT_THREAD.get()).unwrap() as usize;
-        let cur = &mut *THREAD_CONTROL_BLOCK.get();
-        cur[id].regs = regs.0;
-        cur[id].cpsr = PSR::get_spsr().into();
-    }
-    let (next_regs, cpsr) = unsafe {
-        let tcb = &mut *THREAD_CONTROL_BLOCK.get();
-        let mut next_id = (*CURRENT_THREAD.get()).unwrap() as usize;
-        loop {
-            next_id = (next_id + 1) % tcb.len();
-            if !tcb[next_id].dead {
-                break;
-            }
+        let tcbs = &mut *THREAD_CONTROL_BLOCKS.get();
+        tcbs.pop_front(); // pop the current thread, which is at the front of the queue
+
+        // TODO! handle deallocation of stack
+
+        // if there are no more threads, we should return to the system thread, which is the thread that called join
+        if tcbs.is_empty() {
+            let system_thread = SYSTEM_THREAD.get().read().unwrap();
+            tcbs.push_back(system_thread);
         }
-        *CURRENT_THREAD.get() = Some(next_id as u32);
-        (tcb[next_id].regs, tcb[next_id].cpsr)
-    };
-    
-    // and then finally RFE to LR!
-    let rfe_tramp: [usize;2] = [next_regs[14], cpsr.try_into().unwrap()];
 
-    // set up registers
-    set_registers_asm(&Regs(next_regs));
-    unsafe { core::arch::asm!("rfe {r}", r=in(reg) &rfe_tramp); }
+        // and then dispatch to the next thread, which is now at the front of the queue
+        thread_dispatch();
+    }
+}
 
+/// ASSUMES: SUPER mode
+/// join and start threading system
+extern "C" fn thread_join_do(current_context: &'static Context) {
+    let mut tcb = ThreadControlBlock::default();
+    tcb.regs = current_context.clone();
+    unsafe {
+        SYSTEM_THREAD.get().write(Some(tcb));
+    } // save the system thread's context so we can return to it when all threads are done
+    thread_dispatch();
+}
+
+#[unsafe(naked)]
+pub extern "C" fn thread_join() {
+    core::arch::naked_asm!(
+        "sub r0, sp, #68", // make space for the context on the stack; 17 registers * 4 bytes each = 68 bytes
+        "stmia r0, {{r0-r14}}^",
+        "str lr, [r0, #60]", // we leave join when we are all done, so we should set PC to the lr
+        "mrs r1, cpsr", // we keep track of our cpsr
+        "str r1, [r0, #64]", // put it at the end of the context
+        "b {handler}", // call the context switch handler
+        handler = sym thread_join_do
+    );
+}
+
+/////// user mode helpers ///////
+
+/// ASSUMES: USER mode
+/// called when threads begin execution
+extern "C" fn thread_start_trampoline(entrypoint: extern "C" fn()) {
+    println!("START THREAD");
+    unsafe {
+        core::arch::asm!("mov r0, {entrypoint}", entrypoint=in(reg) entrypoint as u32);
+        core::arch::asm!("blx r0");
+    }
+    thread_end_trampoline();
+}
+
+/// ASSUMES: USER mode
+extern "C" fn thread_end_trampoline() {
+    println!("END THREAD");
+
+    // and then swi to the kernel to trigger a context switch, which will clean up the thread and jump to the next one
+    unsafe {
+        core::arch::asm!(swi!(1));
+    } // syscall 1 is dead thread
+}
+
+/// ASSUMES: USER mode
+/// voluntarily yield control
+pub extern "C" fn thread_yield() {
+    unsafe {
+        core::arch::asm!(swi!(0));
+    } // syscall 1 is context switch
 }

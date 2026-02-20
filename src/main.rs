@@ -5,8 +5,10 @@
 // os stuff
 mod boot;
 mod comm;
-mod regs;
 mod threading;
+#[macro_use]
+mod syscalls;
+
 mod utils;
 
 // lisp stuff
@@ -14,22 +16,31 @@ mod utils;
 
 extern crate alloc;
 
-use regs::cpsr::Mode;
-use regs::banked::{BankedRegs};
+extern "C" fn thread1() {
+    let mut x = 0;
+    loop {
+        x += 1;
+        println!("thread 1: {}", x);
+        threading::thread_yield();
+    }
+}
 
+extern "C" fn thread2() {
+    let mut x = 0;
+    loop {
+        x += 1;
+        println!("thread 2: {}", x);
+        threading::thread_yield();
+    }
+}
 
 fn main() {
-    // let regs = BankedRegisters::new(8,4);
-    // regs.set(Mode::System);
-    // let newregs = BankedRegisters::get(Mode::FIQ);
-    let b = BankedRegs::get(Mode::FIQ);
-    println!("h {:#x?} {:#x?}", b.lr, b.sp);
+    println!("Hello, world!");
 
-    BankedRegs::new(8,9).set(Mode::FIQ);
+    // create two threads
+    threading::thread_push(thread1);
+    threading::thread_push(thread2);
 
-    let q = BankedRegs::get(Mode::FIQ);
-    println!("h {:?} {:?}", q.lr, q.sp);
-
-
-    // println!("stakc pointer: {:?} {:?}", newregs.lr, newregs.sp);
+    // start the scheduler
+    threading::thread_join();
 }

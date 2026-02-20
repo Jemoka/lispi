@@ -10,7 +10,7 @@ pub enum Mode {
     Supervisor = 0b10011,
     Abort = 0b10111,
     Undefined = 0b11011,
-    System = 0b11111
+    System = 0b11111,
 }
 
 bitfield! {

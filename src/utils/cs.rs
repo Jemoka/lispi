@@ -1,6 +1,6 @@
 //! critical section implementation for our pi
 
-use crate::regs::cpsr::PSR;
+use crate::utils::psr::PSR;
 use critical_section::RawRestoreState;
 
 struct Cs;
