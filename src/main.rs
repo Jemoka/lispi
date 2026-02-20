@@ -9,7 +9,7 @@ mod regs;
 mod utils;
 
 // lisp stuff
-mod language;
+// mod language; // UNCOMMENT WHEN BACK TO LISPI
 
 extern crate alloc;
 use alloc::collections::BTreeMap;

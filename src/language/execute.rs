@@ -41,7 +41,7 @@ pub fn execute(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment
             c.env.iter().for_each(|(k, v)| {
                 temp_env.insert(k.clone(), *v);
             });
-            image.e = temp_env;
+            image.e = temp_env; // TODO how do we know the closed environment symbol ids are found
             c.params
                 .iter()
                 .zip(arg_vals.into_iter())
