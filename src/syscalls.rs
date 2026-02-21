@@ -39,6 +39,7 @@ extern "C" fn unknown_syscall_handler() {
 #[unsafe(naked)]
 pub extern "C" fn trampoline_swi() {
     core::arch::naked_asm!(
+        "ldr sp, =32752",
         "cmp r7, #0",                        // Check the value in r0
         "beq {thread_context_switch}",       // If r7 == 0, branch to handler_zero
         "cmp r7, #1",

@@ -11,7 +11,7 @@ core::arch::global_asm!(
 exception_vector:
     b {trampoline_unset} @ reset
     b {trampoline_unset} @ undefined instruction
-    b {trampoline_swi} @ software interrupt
+    b {trampoline_swi}   @ software interrupt
     b {trampoline_unset} @ prefetch abort
     b {trampoline_unset} @ data abort
     b {trampoline_unset} @ nope
@@ -30,5 +30,6 @@ pub extern "C" fn activate_exception_vector_hook() {
         "mcr p15, 0, r0, c12, c0, 0", // set the exception vector
         "mcr p15, 0, r0, c7, c10, 4", // DSB
         "mcr p15, 0, r0, c7, c5, 4",  // ISB
+        "bx lr"
     );
 }

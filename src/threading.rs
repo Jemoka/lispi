@@ -78,7 +78,7 @@ unsafe impl Send for ThreadControlBlock {}
 
 static THREAD_CONTROL_BLOCKS: SyncUnsafeCell<VecDeque<ThreadControlBlock>> =
     SyncUnsafeCell::new(VecDeque::new());
-static SYSTEM_THREAD: SyncUnsafeCell<Option<ThreadControlBlock>> = SyncUnsafeCell::new(None);
+static THREADING_STACK_PTR: [u32; 1] = [0u32; 1]; //  pointer to stack of the system after returning
 
 /// ASSUMES: SUPER mode
 /// get a pointer into the regs array, and:
@@ -135,12 +135,16 @@ pub fn thread_push(entrypoint: extern "C" fn()) {
 /// context switch!
 extern "C" fn thread_context_switch_do(current_context: &'static Context) {
     unsafe {
+        // IMPORTANT: this has to live right here. we need to
+        // eat up the data from stack pointer before anything happens
+        let ctx = core::ptr::read(current_context);
+
         // and finally do the context switch by finding the next thread and dispatching to it
         let tcbs = &mut *THREAD_CONTROL_BLOCKS.get();
         let mut current_thread = tcbs.pop_front().unwrap(); // get the current thread, which is at the front of the queue
 
         // gather context
-        current_thread.regs = current_context.clone(); // update the current thread's context with the gathered context
+        current_thread.regs = ctx; // update the current thread's context with the gathered context
 
         // push the current thread to the back of the queue
         tcbs.push_back(current_thread);
@@ -155,11 +159,13 @@ extern "C" fn thread_context_switch_do(current_context: &'static Context) {
 #[unsafe(naked)]
 pub extern "C" fn thread_context_switch() {
     core::arch::naked_asm!(
-        "sub r0, sp, #68", // make space for the context on the stack; 17 registers * 4 bytes each = 68 bytes
-        "stmia r0, {{r0-r14}}^",
-        "str lr, [r0, #60]", // store the USER pc at the end of the context; which is the lr in exception mode
+        // this move without cleanup is ok because syscalls reset the stack
+        "sub sp, sp, #68", // make space for the context on the stack; 17 registers * 4 bytes each = 68 bytes
+        "stmia sp, {{r0-r14}}^",
+        "str lr, [sp, #60]", // store the USER pc at the end of the context; which is the lr in exception mode
         "mrs r1, spsr", // store the user's cpsr at the end of the context
-        "str r1, [r0, #64]", // store the USER cpsr at the end of the context
+        "str r1, [sp, #64]", // store the USER cpsr at the end of the context
+        "mov r0, sp", // return value of sp
         "b {handler}", // call the context switch handler
         handler = sym thread_context_switch_do
     );
@@ -176,8 +182,14 @@ pub extern "C" fn thread_done() {
 
         // if there are no more threads, we should return to the system thread, which is the thread that called join
         if tcbs.is_empty() {
-            let system_thread = SYSTEM_THREAD.get().read().unwrap();
-            tcbs.push_back(system_thread);
+            core::arch::asm!(
+                "ldr r0, ={stack}", // restore the sp of the system thread, which we saved in join
+                "ldr sp, [r0]", // restore the sp of the system thread, which we saved in join
+                "pop {{r1, r4-r11, lr}}", // pop the callee saved registers, which are the registers of the system thread
+                "msr cpsr, r1", // restore the cpsr of the system thread
+                "bx lr", // restore the cpsr of the system thread
+                stack = sym THREADING_STACK_PTR,
+            );
         }
 
         // and then dispatch to the next thread, which is now at the front of the queue
@@ -187,25 +199,19 @@ pub extern "C" fn thread_done() {
 
 /// ASSUMES: SUPER mode
 /// join and start threading system
-extern "C" fn thread_join_do(current_context: &'static Context) {
-    let mut tcb = ThreadControlBlock::default();
-    tcb.regs = current_context.clone();
-    unsafe {
-        SYSTEM_THREAD.get().write(Some(tcb));
-    } // save the system thread's context so we can return to it when all threads are done
-    thread_dispatch();
-}
-
+/// importantly this isn't a naked function beacuse we want to appear as
+/// a normal function to the caller, and we will eat up the stack and capture
+/// registers in the handler
 #[unsafe(naked)]
 pub extern "C" fn thread_join() {
     core::arch::naked_asm!(
-        "sub r0, sp, #68", // make space for the context on the stack; 17 registers * 4 bytes each = 68 bytes
-        "stmia r0, {{r0-r14}}^",
-        "str lr, [r0, #60]", // we leave join when we are all done, so we should set PC to the lr
-        "mrs r1, cpsr", // we keep track of our cpsr
-        "str r1, [r0, #64]", // put it at the end of the context
-        "b {handler}", // call the context switch handler
-        handler = sym thread_join_do
+        "mrs r1, cpsr", // store the caller's cpsr in r1, which we will restore in the handler
+        "push {{r1, r4-r11, lr}}", // push callee saved registers to the stack, which we will restore in the handler
+        "ldr r0, ={stack}", // save the system thread's sp to the global static stack, which we will restore in the handler
+        "str sp, [r0]", // save the system thread's sp to the global static stack, which we will restore in the handler
+        "b {handler}", // call the join handler, which will save the system thread's context and dispatch to the first thread
+        stack = sym THREADING_STACK_PTR,
+        handler = sym thread_dispatch,
     );
 }
 
