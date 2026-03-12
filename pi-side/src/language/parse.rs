@@ -7,6 +7,7 @@
 //!   '(a b c)             — quote sugar: desugars to (list a b c)
 //!   @name                — syscall (case-insensitive): get32, put32, dsb, prefetch_flush
 //!   #42  #0xFF  #0b101   — address literal (decimal, 0x hex, 0b binary)
+//!   u42  u0xFF  u0b101   — unsigned literal (decimal, 0x hex, 0b binary)
 //!   42  -7               — integer (decimal)
 //!   0xFF                 — integer (hex)
 //!   0b1010               — integer (binary)
@@ -121,6 +122,49 @@ fn parse_address(input: &str) -> IResult<&str, Value> {
         (r, v)
     };
     Ok((rest, Value::Number(Number::Addr(addr))))
+}
+
+/// Parse `u` unsigned literals.
+/// `u0xFF` → hex, `u0b101` → binary, `u42` → decimal.
+fn parse_unsigned(input: &str) -> IResult<&str, Value> {
+    let (rest, _) = char('u')(input)?;
+    // must be followed by a digit or 0x/0b prefix, not an ident char
+    // (to avoid consuming symbols starting with 'u')
+    if rest.is_empty() || !(rest.starts_with(|c: char| c.is_ascii_digit())) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        )));
+    }
+    let make_err = || {
+        nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        ))
+    };
+    let (rest, val) = if rest.starts_with("0x") || rest.starts_with("0X") {
+        let r = &rest[2..];
+        let (r, digits) = hex_digit1(r)?;
+        let v = u32::from_str_radix(digits, 16).map_err(|_| make_err())?;
+        (r, v)
+    } else if rest.starts_with("0b") || rest.starts_with("0B") {
+        let r = &rest[2..];
+        let (r, digits) = take_while1(|c: char| c == '0' || c == '1')(r)?;
+        let v = u32::from_str_radix(digits, 2).map_err(|_| make_err())?;
+        (r, v)
+    } else {
+        let (r, digits) = digit1(rest)?;
+        let v: u32 = digits.parse().map_err(|_| make_err())?;
+        (r, v)
+    };
+    // reject if followed by an ident char (e.g. `u42foo` shouldn't parse as unsigned 42)
+    if rest.starts_with(|c: char| is_ident_char(c)) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        )));
+    }
+    Ok((rest, Value::Number(Number::Unsigned(val))))
 }
 
 /// Parse a floating-point literal: [-]digits.digits
@@ -425,6 +469,7 @@ fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         parse_string,
         parse_address,
+        parse_unsigned,
         parse_quote,
         parse_list,
         parse_syscall,

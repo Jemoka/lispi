@@ -46,7 +46,7 @@ impl Tty {
 
         let file = open_with_retries(&device, 10);
         let fd = file.as_raw_fd();
-        set_8n1(fd, speed, 0.5);
+        set_8n1(fd, speed);
 
         eprintln!("opened tty port <{}>", device);
         Tty { file }
@@ -59,13 +59,8 @@ impl shared::Transport for Tty {
     }
     fn get8(&mut self) -> u8 {
         let mut buf = [0u8; 1];
-        match self.file.read_exact(&mut buf) {
-            Ok(()) => buf[0],
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                panic!("tty read timed out: pi not responding (reboot it?)")
-            }
-            Err(e) => panic!("tty read failed: {} (disconnected?)", e),
-        }
+        self.file.read_exact(&mut buf).expect("tty read failed");
+        buf[0]
     }
 }
 
@@ -83,9 +78,8 @@ fn open_with_retries(device: &str, max_attempts: u32) -> fs::File {
     unreachable!()
 }
 
-fn set_8n1(fd: RawFd, speed: u32, timeout: f64) {
+fn set_8n1(fd: RawFd, speed: u32) {
     use libc::*;
-    assert!(timeout > 0.0 && timeout < 100.0);
 
     let baud = match speed {
         115200 => B115200,
@@ -117,9 +111,9 @@ fn set_8n1(fd: RawFd, speed: u32, timeout: f64) {
         // raw output
         tty.c_oflag &= !OPOST;
 
-        // non-blocking with timeout
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = (timeout * 10.0) as u8;
+        // blocking: wait for at least 1 byte, no timeout
+        tty.c_cc[VMIN] = 1;
+        tty.c_cc[VTIME] = 0;
 
         if tcsetattr(fd, TCSANOW, &tty) != 0 {
             panic!("tcsetattr failed: {}", io::Error::last_os_error());

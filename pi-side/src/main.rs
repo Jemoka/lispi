@@ -16,45 +16,44 @@ mod language;
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use shared::{Framer, Transport};
-
-/// Adapter so pi-side uart (module-level fns) implements Transport.
-struct PiUart;
-
-impl Transport for PiUart {
-    fn put8(&mut self, b: u8) { comm::uart::put8(b); }
-    fn get8(&mut self) -> u8 { comm::uart::get8() }
-    fn put32(&mut self, v: u32) { comm::uart::put32(v); }
-    fn get32(&mut self) -> u32 { comm::uart::get32() }
-    fn flush(&mut self) { comm::uart::flush_tx(); }
-}
-
-fn hash_u32(mut x: u32) -> u32 {
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x85eb_ca6b);
-    x ^= x >> 13;
-    x = x.wrapping_mul(0xc2b2_ae35);
-    x ^= x >> 16;
-    x
-}
+use alloc::format;
+use alloc::string::String;
+use comm::uart::PiUart;
+use shared::Framer;
 
 fn main() {
-    println!("pi-side: echo server ready\n");
 
+    let mut img = language::Image::new();
     let mut framer = Framer::pi_side(PiUart);
-    let mut seed: u32 = 0xCAFE;
+
+    let _ = framer.recv();
+    framer.send("PI_READY".as_bytes());
 
     loop {
-        let payload = framer.recv();
-        seed = hash_u32(seed);
-
-        // build response: original payload + " [rand=0xXXXXXXXX]"
-        let mut response: Vec<u8> = Vec::new();
-        response.extend_from_slice(&payload);
-        let suffix = alloc::format!(" [rand=0x{:08x}]", seed);
-        response.extend_from_slice(suffix.as_bytes());
-
-        framer.send(&response);
+        let payload_str = match String::from_utf8(framer.recv()) {
+            Ok(s) => s,
+            Err(_) => {
+                framer.send("pi-side: received non-UTF8 message\n".as_bytes());
+                continue;
+            }
+        };
+        match language::parse(&payload_str) {
+            Ok(expr) => {
+                match language::evaluate(expr.into(), &mut img) {
+                    Ok((result, _)) => {
+                        let response = format!("{}", result);
+                        framer.send(response.as_bytes());
+                    }
+                    Err(e) => {
+                        let response = format!("{}", e);
+                        framer.send(response.as_bytes());
+                    }
+                }
+            }
+            Err(e) => {
+                let response = format!("PARSE ERROR: {}", e);
+                framer.send(response.as_bytes());
+            }
+        }
     }
 }

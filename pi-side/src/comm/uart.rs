@@ -135,3 +135,14 @@ pub fn get32() -> u32 {
     }
     u32::from_le_bytes(bytes)
 }
+
+/// Transport impl so the framer can use the UART directly.
+pub struct PiUart;
+
+impl shared::Transport for PiUart {
+    fn put8(&mut self, b: u8) { put8(b); }
+    fn get8(&mut self) -> u8 { get8() }
+    fn put32(&mut self, v: u32) { put32(v); }
+    fn get32(&mut self) -> u32 { get32() }
+    fn flush(&mut self) { flush_tx(); }
+}

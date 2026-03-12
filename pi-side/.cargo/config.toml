@@ -9,7 +9,7 @@ rustflags = [
     "-C", "link-arg=--fix-arm1176",
     "-C", "link-arg=--use-blx"
 ]
-runner = "./upload.sh"
+runner = "./copy.sh"
 linker = "arm-none-eabi-ld"
 
 [unstable]

@@ -63,9 +63,12 @@ pub fn execute_syscall(
                     .as_addr()
                     .map_err(|_| "GET32: argument must be an address or non-negative integer.")?;
                 if let super::number::Number::Addr(a) = raw_addr {
+                    if a % 4 != 0 {
+                        return Err("GET32: address must be 4-byte aligned.");
+                    }
                     let val = unsafe { get32(a) };
                     Ok((
-                        Value::Number(super::number::Number::Integer(val as i32)),
+                        Value::Number(super::number::Number::Unsigned(val)),
                         env,
                     ))
                 } else {
@@ -83,10 +86,13 @@ pub fn execute_syscall(
                     |_| "PUT32: first argument must be an address or non-negative integer.",
                 )?;
                 let raw_val = n_val
-                    .as_i32()
-                    .map_err(|_| "PUT32: second argument must be an integer.")?;
+                    .as_u32()
+                    .map_err(|_| "PUT32: second argument must be an integer or unsigned.")?;
                 if let super::number::Number::Addr(a) = raw_addr {
-                    unsafe { put32(a, raw_val as u32) };
+                    if a % 4 != 0 {
+                        return Err("PUT32: address must be 4-byte aligned.");
+                    }
+                    unsafe { put32(a, raw_val) };
                     prefetch_flush();
                     dsb();
                     Ok((Value::Nil, env))

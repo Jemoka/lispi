@@ -1,7 +1,6 @@
 //! Special form definitions and implementations for the LISP interpreter.
 
 use alloc::rc::Rc;
-use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 
 use super::ast::{Closure, Macro, Symbol, Value};
@@ -28,7 +27,6 @@ pub enum Special {
     BinNot,
     BinOr,
     BinAnd,
-    Print,
     Gt,
     Lt,
     Gte,
@@ -122,9 +120,6 @@ impl Special {
         if name.eq_ignore_ascii_case("null?") || name.eq_ignore_ascii_case("nullp") {
             return Some(Self::Nullp);
         }
-        if name.eq_ignore_ascii_case("print") {
-            return Some(Self::Print);
-        }
         if name.eq_ignore_ascii_case("addr") {
             return Some(Self::Addr);
         }
@@ -196,7 +191,10 @@ fn extract_numeric_unary(sexp: Rc<Value>, image: &mut Image) -> Result<Number, &
 pub fn is_falsy(v: &Value) -> bool {
     matches!(
         v,
-        Value::Nil | Value::Bool(false) | Value::Number(Number::Integer(0))
+        Value::Nil
+            | Value::Bool(false)
+            | Value::Number(Number::Integer(0))
+            | Value::Number(Number::Unsigned(0))
     )
 }
 
@@ -286,31 +284,60 @@ pub fn execute_special(
                 Value::Bool(b) => Ok((Value::Bool(!b), env)),
                 Value::Number(Number::Integer(0)) => Ok((Value::Number(Number::Integer(1)), env)),
                 Value::Number(Number::Integer(_)) => Ok((Value::Number(Number::Integer(0)), env)),
+                Value::Number(Number::Unsigned(0)) => Ok((Value::Number(Number::Unsigned(1)), env)),
+                Value::Number(Number::Unsigned(_)) => Ok((Value::Number(Number::Unsigned(0)), env)),
                 _ => Err("not: expected bool or integer."),
             }
         }
 
-        // `binnot`: bitwise NOT on an integer.
+        // `binnot`: bitwise NOT on an integer or unsigned.
         Special::BinNot => {
             let n = extract_numeric_unary(sexp, image)?;
-            let i = n.as_i32()?;
-            Ok((Value::Number(Number::Integer(!i)), env))
+            match n {
+                Number::Integer(i) => Ok((Value::Number(Number::Integer(!i)), env)),
+                Number::Unsigned(u) => Ok((Value::Number(Number::Unsigned(!u)), env)),
+                _ => Err("binnot: expected integer or unsigned."),
+            }
         }
 
-        // `binor`: bitwise OR on two integers.
+        // `binor`: bitwise OR on integers/unsigned.
         Special::BinOr => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            let li = l.as_i32()?;
-            let ri = r.as_i32()?;
-            Ok((Value::Number(Number::Integer(li | ri)), env))
+            match (l, r) {
+                (Number::Integer(a), Number::Integer(b)) => {
+                    Ok((Value::Number(Number::Integer(a | b)), env))
+                }
+                (Number::Unsigned(a), Number::Unsigned(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a | b)), env))
+                }
+                (Number::Unsigned(a), Number::Integer(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a | b as u32)), env))
+                }
+                (Number::Integer(a), Number::Unsigned(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a as u32 | b)), env))
+                }
+                _ => Err("binor: expected integers or unsigned."),
+            }
         }
 
-        // `binand`: bitwise AND on two integers.
+        // `binand`: bitwise AND on integers/unsigned.
         Special::BinAnd => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            let li = l.as_i32()?;
-            let ri = r.as_i32()?;
-            Ok((Value::Number(Number::Integer(li & ri)), env))
+            match (l, r) {
+                (Number::Integer(a), Number::Integer(b)) => {
+                    Ok((Value::Number(Number::Integer(a & b)), env))
+                }
+                (Number::Unsigned(a), Number::Unsigned(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a & b)), env))
+                }
+                (Number::Unsigned(a), Number::Integer(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a & b as u32)), env))
+                }
+                (Number::Integer(a), Number::Unsigned(b)) => {
+                    Ok((Value::Number(Number::Unsigned(a as u32 & b)), env))
+                }
+                _ => Err("binand: expected integers or unsigned."),
+            }
         }
 
         // --- list ops ---
@@ -335,77 +362,21 @@ pub fn execute_special(
 
         // `list` makes a list
         Special::List => {
-            let mut result = Value::Nil;
+            let mut vals = Vec::new();
             let mut i = 1;
             loop {
                 let arg = sexp.nth(i);
                 if arg.is_nil() {
                     break;
                 }
-                let val = evaluate(arg, image)?.0;
-                result = Value::cons(val, result);
+                vals.push(evaluate(arg, image)?.0);
                 i += 1;
+            }
+            let mut result = Value::Nil;
+            for val in vals.into_iter().rev() {
+                result = Value::cons(val, result);
             }
             Ok((result, env))
-        }
-
-        // --- IO ---
-
-        // `print`: prints to UART. First arg is a format string, remaining
-        // args are substituted for `{}` placeholders (left to right).
-        // Returns nil. If no format string, prints each arg separated by spaces.
-        //
-        // Examples:
-        //   (print "hello")           → hello
-        //   (print "x = {}" 42)       → x = 42
-        //   (print "{} + {} = {}" 1 2 3) → 1 + 2 = 3
-        Special::Print => {
-            // collect and evaluate all arguments
-            let mut args: Vec<Value> = Vec::new();
-            let mut i = 1;
-            loop {
-                let arg = sexp.nth(i);
-                if arg.is_nil() {
-                    break;
-                }
-                args.push(evaluate(arg, image)?.0);
-                i += 1;
-            }
-
-            if args.is_empty() {
-                crate::println!();
-            } else if let Value::String(ref fmt_str) = args[0] {
-                // format string mode: replace {} with successive args
-                let mut result = AllocString::new();
-                let mut arg_idx = 1;
-                let mut chars = fmt_str.chars().peekable();
-                while let Some(ch) = chars.next() {
-                    if ch == '{' && chars.peek() == Some(&'}') {
-                        chars.next(); // consume '}'
-                        if arg_idx < args.len() {
-                            use core::fmt::Write;
-                            let _ = write!(result, "{}", args[arg_idx]);
-                            arg_idx += 1;
-                        } else {
-                            result.push_str("{}");
-                        }
-                    } else {
-                        result.push(ch);
-                    }
-                }
-                crate::println!("{}", result);
-            } else {
-                // no format string: print all args space-separated
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        crate::print!(" ");
-                    }
-                    crate::print!("{}", arg);
-                }
-                crate::println!();
-            }
-
-            Ok((Value::Nil, env))
         }
 
         // --- binding / closures ---
