@@ -27,9 +27,12 @@ pub enum Special {
     Xor,
     BinNot,
     BinOr,
+    BinAnd,
     Print,
     Gt,
     Lt,
+    Gte,
+    Lte,
     Add,
     Sub,
     Mul,
@@ -38,6 +41,48 @@ pub enum Special {
     Let,
     List,
     Macroexpand,
+}
+
+impl Special {
+    /// Look up a special form by name (case-insensitive).
+    /// Returns None for user-defined symbols.
+    pub fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("add") { return Some(Self::Add); }
+        if name.eq_ignore_ascii_case("sub") { return Some(Self::Sub); }
+        if name.eq_ignore_ascii_case("mul") { return Some(Self::Mul); }
+        if name.eq_ignore_ascii_case("div") { return Some(Self::Div); }
+        if name.eq_ignore_ascii_case("gt") { return Some(Self::Gt); }
+        if name.eq_ignore_ascii_case("lt") { return Some(Self::Lt); }
+        if name.eq_ignore_ascii_case("gte") { return Some(Self::Gte); }
+        if name.eq_ignore_ascii_case("lte") { return Some(Self::Lte); }
+        if name.eq_ignore_ascii_case("eq") { return Some(Self::Eq); }
+        if name.eq_ignore_ascii_case("not") { return Some(Self::Not); }
+        if name.eq_ignore_ascii_case("and") { return Some(Self::And); }
+        if name.eq_ignore_ascii_case("or") { return Some(Self::Or); }
+        if name.eq_ignore_ascii_case("xor") { return Some(Self::Xor); }
+        if name.eq_ignore_ascii_case("binnot") { return Some(Self::BinNot); }
+        if name.eq_ignore_ascii_case("binor") { return Some(Self::BinOr); }
+        if name.eq_ignore_ascii_case("binand") { return Some(Self::BinAnd); }
+        if name.eq_ignore_ascii_case("defun") { return Some(Self::Defun); }
+        if name.eq_ignore_ascii_case("defmacro") { return Some(Self::Defmacro); }
+        if name.eq_ignore_ascii_case("lambda") || name.eq_ignore_ascii_case("fn") {
+            return Some(Self::Lambda);
+        }
+        if name.eq_ignore_ascii_case("if") { return Some(Self::If); }
+        if name.eq_ignore_ascii_case("set") { return Some(Self::Set); }
+        if name.eq_ignore_ascii_case("begin") { return Some(Self::Begin); }
+        if name.eq_ignore_ascii_case("car") { return Some(Self::Car); }
+        if name.eq_ignore_ascii_case("cdr") { return Some(Self::Cdr); }
+        if name.eq_ignore_ascii_case("null?") || name.eq_ignore_ascii_case("nullp") {
+            return Some(Self::Nullp);
+        }
+        if name.eq_ignore_ascii_case("print") { return Some(Self::Print); }
+        if name.eq_ignore_ascii_case("addr") { return Some(Self::Addr); }
+        if name.eq_ignore_ascii_case("let") { return Some(Self::Let); }
+        if name.eq_ignore_ascii_case("list") { return Some(Self::List); }
+        if name.eq_ignore_ascii_case("macroexpand") { return Some(Self::Macroexpand); }
+        None
+    }
 }
 
 /// Extract and evaluate two numeric arguments from sexp (special left right).
@@ -126,6 +171,14 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             let (l, r) = extract_numeric_binop(sexp, image)?;
             Ok((Value::Bool(l < r), env))
         }
+        Special::Gte => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            Ok((Value::Bool(l >= r), env))
+        }
+        Special::Lte => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            Ok((Value::Bool(l <= r), env))
+        }
         Special::Eq => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
             Ok((Value::Bool(l == r), env))
@@ -184,6 +237,14 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             let li = l.as_i32()?;
             let ri = r.as_i32()?;
             Ok((Value::Number(Number::Integer(li | ri)), env))
+        }
+
+        // `binand`: bitwise AND on two integers.
+        Special::BinAnd => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            let li = l.as_i32()?;
+            let ri = r.as_i32()?;
+            Ok((Value::Number(Number::Integer(li & ri)), env))
         }
 
         // --- list ops ---

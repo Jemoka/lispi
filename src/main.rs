@@ -17,6 +17,6 @@ mod language;
 extern crate alloc;
 
 fn main() {
-    // (begin (set a 3) (let (a 2) (set a 5)) a) 
-    println!("Goodbye, world!");
+    let test = language::parse("(+ 1 (- 12 @dsb))").unwrap();
+    println!("Goodbye, world! {}\n", test);
 }

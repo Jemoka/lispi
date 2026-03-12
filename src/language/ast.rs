@@ -1,6 +1,5 @@
 //! LISP language infrastructure
 
-use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::fmt;

@@ -18,3 +18,4 @@ bytemuck = "1.25.0"
 embedded-alloc = "0.7.0"
 critical-section = { version = "1.1", default-features = false, features = ["restore-state-u32"] }
 proc-bitfield = "0.5.3"
+nom = { version="8.0.0", default-features=false, features=["alloc"]}
