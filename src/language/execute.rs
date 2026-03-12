@@ -3,7 +3,6 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::ast::Syscall;
 use super::ast::Value;
 use super::environment::{Environment, Image};
 use super::special::execute_special;
