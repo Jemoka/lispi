@@ -1,16 +1,13 @@
 //! Numeric type for the LISP interpreter.
-//! Unifies integers, unsigned integers, floats, and addresses.
-//! Integer/float operations lift to float if either operand is float.
+//! Unifies integers, unsigned integers, and addresses.
 //! Unsigned promotes when mixed with Integer.
-//! Addr is a separate kind — it represents a raw memory address and
-//! does not participate in float promotion.
+//! Addr is a separate kind — it represents a raw memory address.
 //!
 //! Arithmetic rules:
 //!   Int op Int       → Int
 //!   Unsigned op Unsigned → Unsigned
 //!   Unsigned op Int  → Unsigned (promotes)
 //!   Int op Unsigned  → Unsigned (promotes)
-//!   Float op any     → Float (lifts)
 //!   Addr +/- Int     → Addr  (pointer offset)
 //!   Addr +/- Unsigned → Addr (pointer offset)
 //!   Int + Addr       → Addr  (pointer offset, commutative)
@@ -21,31 +18,20 @@
 
 use core::fmt;
 
-/// A number: exact integer, unsigned integer, float, or raw address.
+/// A number: exact integer, unsigned integer, or raw address.
 /// Implements PartialEq and PartialOrd so you can use ==, <, >, <=, >=.
 #[derive(Clone, Copy, Debug)]
 pub enum Number {
     Integer(i32),
     Unsigned(u32),
-    Float(f32),
     /// A raw memory address. Kept separate from Integer so that address
-    /// arithmetic is explicit and you can't accidentally float-promote
-    /// a pointer.
+    /// arithmetic is explicit.
     Addr(usize),
 }
 
 impl Number {
-    pub fn as_f32(&self) -> f32 {
-        match self {
-            Number::Integer(i) => *i as f32,
-            Number::Unsigned(u) => *u as f32,
-            Number::Float(f) => *f,
-            Number::Addr(a) => *a as f32,
-        }
-    }
-
     /// Coerce to Addr. Identity if already Addr, converts non-negative
-    /// integers and unsigned, rejects floats.
+    /// integers and unsigned.
     pub fn as_addr(&self) -> Result<Number, &'static str> {
         match self {
             Number::Addr(_) => Ok(*self),
@@ -57,25 +43,24 @@ impl Number {
                 }
             }
             Number::Unsigned(u) => Ok(Number::Addr(*u as usize)),
-            Number::Float(_) => Err("Cannot convert float to address."),
         }
     }
 
-    /// Extract the inner i32, or cast from unsigned. Error for float/addr.
+    /// Extract the inner i32, or cast from unsigned. Error for addr.
     pub fn as_i32(&self) -> Result<i32, &'static str> {
         match self {
             Number::Integer(i) => Ok(*i),
             Number::Unsigned(u) => Ok(*u as i32),
-            _ => Err("Expected integer."),
+            Number::Addr(_) => Err("Expected integer."),
         }
     }
 
-    /// Extract the inner u32, or cast from integer. Error for float/addr.
+    /// Extract the inner u32, or cast from integer. Error for addr.
     pub fn as_u32(&self) -> Result<u32, &'static str> {
         match self {
             Number::Unsigned(u) => Ok(*u),
             Number::Integer(i) => Ok(*i as u32),
-            _ => Err("Expected unsigned integer."),
+            Number::Addr(_) => Err("Expected unsigned integer."),
         }
     }
 
@@ -99,10 +84,6 @@ impl Number {
                 Ok(Number::Addr((a as usize).wrapping_add(b)))
             }
             (Number::Addr(_), Number::Addr(_)) => Err("Cannot add two addresses."),
-            (Number::Addr(_), Number::Float(_)) | (Number::Float(_), Number::Addr(_)) => {
-                Err("Cannot mix address and float.")
-            }
-            _ => Ok(Number::Float(self.as_f32() + other.as_f32())),
         }
     }
 
@@ -125,10 +106,6 @@ impl Number {
             (Number::Integer(_), Number::Addr(_)) | (Number::Unsigned(_), Number::Addr(_)) => {
                 Err("Cannot subtract address from integer.")
             }
-            (Number::Addr(_), Number::Float(_)) | (Number::Float(_), Number::Addr(_)) => {
-                Err("Cannot mix address and float.")
-            }
-            _ => Ok(Number::Float(self.as_f32() - other.as_f32())),
         }
     }
 
@@ -144,7 +121,6 @@ impl Number {
                 Ok(Number::Unsigned((a as u32).wrapping_mul(b)))
             }
             (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot multiply addresses."),
-            _ => Ok(Number::Float(self.as_f32() * other.as_f32())),
         }
     }
 
@@ -180,14 +156,6 @@ impl Number {
                     Ok(Number::Unsigned(a as u32 / b))
                 }
             }
-            _ => {
-                let d = other.as_f32();
-                if d == 0.0 {
-                    Err("Division by zero.")
-                } else {
-                    Ok(Number::Float(self.as_f32() / d))
-                }
-            }
         }
     }
 }
@@ -197,7 +165,6 @@ impl fmt::Display for Number {
         match self {
             Number::Integer(i) => write!(f, "{}", i),
             Number::Unsigned(u) => write!(f, "u{}", u),
-            Number::Float(v) => write!(f, "{}", v),
             Number::Addr(a) => write!(f, "0x{:x}", a),
         }
     }
@@ -218,14 +185,6 @@ impl PartialEq for Number {
             // addr/unsigned: compare as usize
             (Number::Addr(a), Number::Unsigned(b)) => *a == *b as usize,
             (Number::Unsigned(a), Number::Addr(b)) => *a as usize == *b,
-            // float mixed: lift to float
-            (Number::Float(_), Number::Float(_))
-            | (Number::Integer(_), Number::Float(_))
-            | (Number::Float(_), Number::Integer(_))
-            | (Number::Unsigned(_), Number::Float(_))
-            | (Number::Float(_), Number::Unsigned(_)) => self.as_f32() == other.as_f32(),
-            // addr vs float: incomparable
-            _ => false,
         }
     }
 }
@@ -243,15 +202,7 @@ impl PartialOrd for Number {
             (Number::Integer(a), Number::Unsigned(b)) => {
                 (*a as i64).partial_cmp(&(*b as i64))
             }
-            // float mixed: lift to float
-            (Number::Float(_), Number::Float(_))
-            | (Number::Integer(_), Number::Float(_))
-            | (Number::Float(_), Number::Integer(_))
-            | (Number::Unsigned(_), Number::Float(_))
-            | (Number::Float(_), Number::Unsigned(_)) => {
-                self.as_f32().partial_cmp(&other.as_f32())
-            }
-            // addr vs int/float: incomparable
+            // addr vs int: incomparable
             _ => None,
         }
     }

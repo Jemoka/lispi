@@ -11,7 +11,6 @@
 //!   42  -7               — integer (decimal)
 //!   0xFF                 — integer (hex)
 //!   0b1010               — integer (binary)
-//!   3.14  -0.5           — float
 //!   "hello"              — string (supports \n \t \\ \")
 //!   + - * / > < ~ | &   — operator specials
 //!   nil true false       — literal values
@@ -167,20 +166,6 @@ fn parse_unsigned(input: &str) -> IResult<&str, Value> {
     Ok((rest, Value::Number(Number::Unsigned(val))))
 }
 
-/// Parse a floating-point literal: [-]digits.digits
-fn parse_float(input: &str) -> IResult<&str, Value> {
-    let start = input;
-    let (i, _) = opt(char('-')).parse(input)?;
-    let (i, _) = digit1(i)?;
-    let (i, _) = char('.')(i)?;
-    let (rest, _) = digit1(i)?;
-    let slice = &start[..start.len() - rest.len()];
-    let f: f32 = slice.parse().map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Float))
-    })?;
-    Ok((rest, Value::Number(Number::Float(f))))
-}
-
 /// Parse a hex integer: 0xFF or 0XFF
 fn parse_hex_integer(input: &str) -> IResult<&str, Value> {
     let start = input;
@@ -234,15 +219,9 @@ fn parse_integer(input: &str) -> IResult<&str, Value> {
     Ok((rest, Value::Number(Number::Integer(i))))
 }
 
-/// Parse a number: try hex/binary first (0x/0b prefixes), then float, then decimal integer.
+/// Parse a number: try hex/binary first (0x/0b prefixes), then decimal integer.
 fn parse_number(input: &str) -> IResult<&str, Value> {
-    alt((
-        parse_hex_integer,
-        parse_bin_integer,
-        parse_float,
-        parse_integer,
-    ))
-    .parse(input)
+    alt((parse_hex_integer, parse_bin_integer, parse_integer)).parse(input)
 }
 
 // ---------------------------------------------------------------------------
