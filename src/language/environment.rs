@@ -47,9 +47,7 @@ pub struct Image {
 
 impl Image {
     pub fn new() -> Self {
-        Image {
-            e: BTreeMap::new(),
-        }
+        Image { e: BTreeMap::new() }
     }
 
     /// Create a **fresh** binding for `name` with `value`.

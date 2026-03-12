@@ -67,8 +67,9 @@ impl Number {
             (Number::Addr(a), Number::Integer(b)) => Ok(Number::Addr(a.wrapping_add(b as usize))),
             (Number::Integer(a), Number::Addr(b)) => Ok(Number::Addr((a as usize).wrapping_add(b))),
             (Number::Addr(_), Number::Addr(_)) => Err("Cannot add two addresses."),
-            (Number::Addr(_), Number::Float(_))
-            | (Number::Float(_), Number::Addr(_)) => Err("Cannot mix address and float."),
+            (Number::Addr(_), Number::Float(_)) | (Number::Float(_), Number::Addr(_)) => {
+                Err("Cannot mix address and float.")
+            }
             _ => Ok(Number::Float(self.as_f32() + other.as_f32())),
         }
     }
@@ -80,8 +81,9 @@ impl Number {
             (Number::Addr(a), Number::Integer(b)) => Ok(Number::Addr(a.wrapping_sub(b as usize))),
             (Number::Addr(a), Number::Addr(b)) => Ok(Number::Integer(a.wrapping_sub(b) as i32)),
             (Number::Integer(_), Number::Addr(_)) => Err("Cannot subtract address from integer."),
-            (Number::Addr(_), Number::Float(_))
-            | (Number::Float(_), Number::Addr(_)) => Err("Cannot mix address and float."),
+            (Number::Addr(_), Number::Float(_)) | (Number::Float(_), Number::Addr(_)) => {
+                Err("Cannot mix address and float.")
+            }
             _ => Ok(Number::Float(self.as_f32() - other.as_f32())),
         }
     }
@@ -100,13 +102,19 @@ impl Number {
         match (self, other) {
             (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot divide addresses."),
             (Number::Integer(a), Number::Integer(b)) => {
-                if b == 0 { Err("Division by zero.") }
-                else { Ok(Number::Integer(a / b)) }
+                if b == 0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Integer(a / b))
+                }
             }
             _ => {
                 let d = other.as_f32();
-                if d == 0.0 { Err("Division by zero.") }
-                else { Ok(Number::Float(self.as_f32() / d)) }
+                if d == 0.0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Float(self.as_f32() / d))
+                }
             }
         }
     }

@@ -1,10 +1,10 @@
 //! LISP language infrastructure
 
 use alloc::rc::Rc;
+use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 use core::fmt;
 use heapless::String;
-use alloc::string::String as AllocString;
 
 use super::constants::SYMB_NAME_LEN;
 use super::environment;
@@ -112,7 +112,9 @@ impl fmt::Display for Value {
                 loop {
                     match current {
                         Value::Cons(car, cdr) => {
-                            if !first { write!(f, " ")?; }
+                            if !first {
+                                write!(f, " ")?;
+                            }
                             first = false;
                             write!(f, "{}", car)?;
                             current = cdr;

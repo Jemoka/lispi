@@ -22,15 +22,15 @@ use alloc::vec::Vec;
 
 use nom::{
     IResult, Parser,
+    branch::alt,
     bytes::complete::take_while1,
     character::complete::{char, digit1, hex_digit1, multispace0, satisfy},
     combinator::opt,
-    branch::alt,
 };
 
-use super::ast::{Value, Special, Syscall};
-use super::number::Number;
+use super::ast::{Special, Syscall, Value};
 use super::constants::SYMB_NAME_LEN;
+use super::number::Number;
 
 type Symbol = heapless::String<SYMB_NAME_LEN>;
 
@@ -76,7 +76,10 @@ fn parse_string(input: &str) -> IResult<&str, Value> {
                 't' => s.push('\t'),
                 '\\' => s.push('\\'),
                 '"' => s.push('"'),
-                other => { s.push('\\'); s.push(other); }
+                other => {
+                    s.push('\\');
+                    s.push(other);
+                }
             }
             escape = false;
         } else if ch == '\\' {
@@ -94,7 +97,10 @@ fn parse_address(input: &str) -> IResult<&str, Value> {
     let (rest, _) = char('#')(input)?;
     let (rest, digits) = hex_digit1(rest)?;
     let addr = usize::from_str_radix(digits, 16).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::HexDigit))
+        nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::HexDigit,
+        ))
     })?;
     Ok((rest, Value::Number(Number::Addr(addr))))
 }
@@ -167,10 +173,7 @@ fn parse_quote(input: &str) -> IResult<&str, Value> {
     let (rest, _) = char('\'')(input)?;
     let (rest, inner) = parse_value(rest)?;
     let quoted = match inner {
-        Value::Cons(_, _) => Value::Cons(
-            Rc::new(Value::Special(Special::List)),
-            Rc::new(inner),
-        ),
+        Value::Cons(_, _) => Value::Cons(Rc::new(Value::Special(Special::List)), Rc::new(inner)),
         _ => Value::cons(
             Value::Special(Special::List),
             Value::cons(inner, Value::Nil),
@@ -226,7 +229,8 @@ fn parse_operator(input: &str) -> IResult<&str, Value> {
     if input.starts_with("<=") {
         return Ok((&input[2..], Value::Special(Special::Lte)));
     }
-    let (rest, ch) = satisfy(|c| matches!(c, '+' | '*' | '/' | '>' | '<' | '~' | '|' | '&'))(input)?;
+    let (rest, ch) =
+        satisfy(|c| matches!(c, '+' | '*' | '/' | '>' | '<' | '~' | '|' | '&'))(input)?;
     // reject if followed by an identifier-start char (e.g. `/foo` shouldn't be Div)
     if rest.starts_with(|c: char| is_ident_start(c)) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -266,9 +270,15 @@ fn parse_minus(input: &str) -> IResult<&str, Value> {
 
 /// Try to match a word as a literal (case-insensitive).
 fn match_literal(word: &str) -> Option<Value> {
-    if word.eq_ignore_ascii_case("nil") { return Some(Value::Nil); }
-    if word.eq_ignore_ascii_case("true") { return Some(Value::Bool(true)); }
-    if word.eq_ignore_ascii_case("false") { return Some(Value::Bool(false)); }
+    if word.eq_ignore_ascii_case("nil") {
+        return Some(Value::Nil);
+    }
+    if word.eq_ignore_ascii_case("true") {
+        return Some(Value::Bool(true));
+    }
+    if word.eq_ignore_ascii_case("false") {
+        return Some(Value::Bool(false));
+    }
     None
 }
 
@@ -321,7 +331,8 @@ fn parse_value(input: &str) -> IResult<&str, Value> {
         parse_operator,
         parse_minus,
         parse_identifier,
-    )).parse(input)
+    ))
+    .parse(input)
 }
 
 /// Public entry point: parse one value from the input.

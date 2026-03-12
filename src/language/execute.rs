@@ -3,15 +3,19 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::ast::Value;
 use super::ast::Syscall;
+use super::ast::Value;
 use super::environment::{Environment, Image};
 use super::special::execute_special;
 use super::syscalls::execute_syscall;
 
 /// Call a closure with already-prepared argument values.
 /// Handles environment save/restore and scope layering.
-fn call_closure(c: &super::ast::Closure, arg_vals: Vec<Rc<Value>>, image: &mut Image) -> Result<(Value, Environment), &'static str> {
+fn call_closure(
+    c: &super::ast::Closure,
+    arg_vals: Vec<Rc<Value>>,
+    image: &mut Image,
+) -> Result<(Value, Environment), &'static str> {
     let orig_env = image.e.clone();
 
     // build closure scope: (1) caller -> (2) captured -> (3) params
@@ -85,7 +89,8 @@ fn execute(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment), &
         }
         Value::Macro(m) => {
             // call the closure with UNEVALUATED args (raw sexps)
-            let arg_vals: Vec<Rc<Value>> = m.params
+            let arg_vals: Vec<Rc<Value>> = m
+                .params
                 .iter()
                 .enumerate()
                 .map(|(i, _)| sexp.nth(i + 1))

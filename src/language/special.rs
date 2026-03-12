@@ -4,7 +4,7 @@ use alloc::rc::Rc;
 use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 
-use super::ast::{Closure, Macro, Value, Symbol};
+use super::ast::{Closure, Macro, Symbol, Value};
 use super::environment::{Environment, Image};
 use super::execute::evaluate;
 use super::number::Number;
@@ -47,46 +47,105 @@ impl Special {
     /// Look up a special form by name (case-insensitive).
     /// Returns None for user-defined symbols.
     pub fn from_name(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case("add") { return Some(Self::Add); }
-        if name.eq_ignore_ascii_case("sub") { return Some(Self::Sub); }
-        if name.eq_ignore_ascii_case("mul") { return Some(Self::Mul); }
-        if name.eq_ignore_ascii_case("div") { return Some(Self::Div); }
-        if name.eq_ignore_ascii_case("gt") { return Some(Self::Gt); }
-        if name.eq_ignore_ascii_case("lt") { return Some(Self::Lt); }
-        if name.eq_ignore_ascii_case("gte") { return Some(Self::Gte); }
-        if name.eq_ignore_ascii_case("lte") { return Some(Self::Lte); }
-        if name.eq_ignore_ascii_case("eq") { return Some(Self::Eq); }
-        if name.eq_ignore_ascii_case("not") { return Some(Self::Not); }
-        if name.eq_ignore_ascii_case("and") { return Some(Self::And); }
-        if name.eq_ignore_ascii_case("or") { return Some(Self::Or); }
-        if name.eq_ignore_ascii_case("xor") { return Some(Self::Xor); }
-        if name.eq_ignore_ascii_case("binnot") { return Some(Self::BinNot); }
-        if name.eq_ignore_ascii_case("binor") { return Some(Self::BinOr); }
-        if name.eq_ignore_ascii_case("binand") { return Some(Self::BinAnd); }
-        if name.eq_ignore_ascii_case("defun") { return Some(Self::Defun); }
-        if name.eq_ignore_ascii_case("defmacro") { return Some(Self::Defmacro); }
+        if name.eq_ignore_ascii_case("add") {
+            return Some(Self::Add);
+        }
+        if name.eq_ignore_ascii_case("sub") {
+            return Some(Self::Sub);
+        }
+        if name.eq_ignore_ascii_case("mul") {
+            return Some(Self::Mul);
+        }
+        if name.eq_ignore_ascii_case("div") {
+            return Some(Self::Div);
+        }
+        if name.eq_ignore_ascii_case("gt") {
+            return Some(Self::Gt);
+        }
+        if name.eq_ignore_ascii_case("lt") {
+            return Some(Self::Lt);
+        }
+        if name.eq_ignore_ascii_case("gte") {
+            return Some(Self::Gte);
+        }
+        if name.eq_ignore_ascii_case("lte") {
+            return Some(Self::Lte);
+        }
+        if name.eq_ignore_ascii_case("eq") {
+            return Some(Self::Eq);
+        }
+        if name.eq_ignore_ascii_case("not") {
+            return Some(Self::Not);
+        }
+        if name.eq_ignore_ascii_case("and") {
+            return Some(Self::And);
+        }
+        if name.eq_ignore_ascii_case("or") {
+            return Some(Self::Or);
+        }
+        if name.eq_ignore_ascii_case("xor") {
+            return Some(Self::Xor);
+        }
+        if name.eq_ignore_ascii_case("binnot") {
+            return Some(Self::BinNot);
+        }
+        if name.eq_ignore_ascii_case("binor") {
+            return Some(Self::BinOr);
+        }
+        if name.eq_ignore_ascii_case("binand") {
+            return Some(Self::BinAnd);
+        }
+        if name.eq_ignore_ascii_case("defun") {
+            return Some(Self::Defun);
+        }
+        if name.eq_ignore_ascii_case("defmacro") {
+            return Some(Self::Defmacro);
+        }
         if name.eq_ignore_ascii_case("lambda") || name.eq_ignore_ascii_case("fn") {
             return Some(Self::Lambda);
         }
-        if name.eq_ignore_ascii_case("if") { return Some(Self::If); }
-        if name.eq_ignore_ascii_case("set") { return Some(Self::Set); }
-        if name.eq_ignore_ascii_case("begin") { return Some(Self::Begin); }
-        if name.eq_ignore_ascii_case("car") { return Some(Self::Car); }
-        if name.eq_ignore_ascii_case("cdr") { return Some(Self::Cdr); }
+        if name.eq_ignore_ascii_case("if") {
+            return Some(Self::If);
+        }
+        if name.eq_ignore_ascii_case("set") {
+            return Some(Self::Set);
+        }
+        if name.eq_ignore_ascii_case("begin") {
+            return Some(Self::Begin);
+        }
+        if name.eq_ignore_ascii_case("car") {
+            return Some(Self::Car);
+        }
+        if name.eq_ignore_ascii_case("cdr") {
+            return Some(Self::Cdr);
+        }
         if name.eq_ignore_ascii_case("null?") || name.eq_ignore_ascii_case("nullp") {
             return Some(Self::Nullp);
         }
-        if name.eq_ignore_ascii_case("print") { return Some(Self::Print); }
-        if name.eq_ignore_ascii_case("addr") { return Some(Self::Addr); }
-        if name.eq_ignore_ascii_case("let") { return Some(Self::Let); }
-        if name.eq_ignore_ascii_case("list") { return Some(Self::List); }
-        if name.eq_ignore_ascii_case("macroexpand") { return Some(Self::Macroexpand); }
+        if name.eq_ignore_ascii_case("print") {
+            return Some(Self::Print);
+        }
+        if name.eq_ignore_ascii_case("addr") {
+            return Some(Self::Addr);
+        }
+        if name.eq_ignore_ascii_case("let") {
+            return Some(Self::Let);
+        }
+        if name.eq_ignore_ascii_case("list") {
+            return Some(Self::List);
+        }
+        if name.eq_ignore_ascii_case("macroexpand") {
+            return Some(Self::Macroexpand);
+        }
         None
     }
 }
 
 /// Extract and evaluate two numeric arguments from sexp (special left right).
-fn extract_numeric_binop(sexp: Rc<Value>, image: &mut Image) -> Result<(Number, Number), &'static str> {
+fn extract_numeric_binop(
+    sexp: Rc<Value>,
+    image: &mut Image,
+) -> Result<(Number, Number), &'static str> {
     let left = sexp.nth(1);
     let right = sexp.nth(2);
 
@@ -135,7 +194,10 @@ fn extract_numeric_unary(sexp: Rc<Value>, image: &mut Image) -> Result<Number, &
 
 /// A value is falsy if it is nil, false, or integer 0.
 pub fn is_falsy(v: &Value) -> bool {
-    matches!(v, Value::Nil | Value::Bool(false) | Value::Number(Number::Integer(0)))
+    matches!(
+        v,
+        Value::Nil | Value::Bool(false) | Value::Number(Number::Integer(0))
+    )
 }
 
 /// Walk a cons list and collect each element as an Rc<Symbol>.
@@ -159,7 +221,11 @@ fn collect_symbol_list(list: &Value) -> Result<Vec<Rc<Symbol>>, &'static str> {
     Ok(params)
 }
 
-pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment), &'static str> {
+pub fn execute_special(
+    form: Special,
+    sexp: Rc<Value>,
+    image: &mut Image,
+) -> Result<(Value, Environment), &'static str> {
     let env = image.e.clone();
     match form {
         // --- comparators ---
@@ -273,7 +339,9 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             let mut i = 1;
             loop {
                 let arg = sexp.nth(i);
-                if arg.is_nil() { break; }
+                if arg.is_nil() {
+                    break;
+                }
                 let val = evaluate(arg, image)?.0;
                 result = Value::cons(val, result);
                 i += 1;
@@ -297,7 +365,9 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             let mut i = 1;
             loop {
                 let arg = sexp.nth(i);
-                if arg.is_nil() { break; }
+                if arg.is_nil() {
+                    break;
+                }
                 args.push(evaluate(arg, image)?.0);
                 i += 1;
             }
@@ -327,7 +397,9 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             } else {
                 // no format string: print all args space-separated
                 for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { crate::print!(" "); }
+                    if i > 0 {
+                        crate::print!(" ");
+                    }
                     crate::print!("{}", arg);
                 }
                 crate::println!();
@@ -354,11 +426,14 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
 
             let params = collect_symbol_list(&param_list)?;
 
-            Ok((Value::Closure(Closure {
-                params,
-                body,
-                env: env.clone(),
-            }), env))
+            Ok((
+                Value::Closure(Closure {
+                    params,
+                    body,
+                    env: env.clone(),
+                }),
+                env,
+            ))
         }
 
         // `set`: bind a name in the current environment.
@@ -496,7 +571,9 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             let mut i = 1;
             loop {
                 let arg = sexp.nth(i);
-                if arg.is_nil() { break; }
+                if arg.is_nil() {
+                    break;
+                }
                 last_val = evaluate(arg, image)?.0;
                 i += 1;
             }
@@ -632,7 +709,8 @@ pub fn execute_special(form: Special, sexp: Rc<Value>, image: &mut Image) -> Res
             };
 
             // collect unevaluated args
-            let arg_vals: Vec<Rc<Value>> = m.params
+            let arg_vals: Vec<Rc<Value>> = m
+                .params
                 .iter()
                 .enumerate()
                 .map(|(i, _)| arg.nth(i + 1))
