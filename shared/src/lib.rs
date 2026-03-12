@@ -34,6 +34,9 @@
 
 #![no_std]
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 pub const BAUD_RATE: u32 = 115200;
 
 /// Number of sync words to send before a frame.
@@ -134,9 +137,8 @@ impl<T: Transport> Framer<T> {
     }
 
     /// Receive a framed message. Blocks until a complete frame arrives.
-    /// `buf` must be large enough for the payload; returns the number
-    /// of bytes written. Panics if payload exceeds `buf.len()`.
-    pub fn recv<'a>(&mut self, buf: &'a mut [u8]) -> &'a [u8] {
+    /// Returns the payload as an owned Vec.
+    pub fn recv(&mut self) -> Vec<u8> {
         // scan for header: skip sync words, find four consecutive zero u32s
         let mut zero_count: u32 = 0;
         loop {
@@ -153,11 +155,11 @@ impl<T: Transport> Framer<T> {
 
         // payload length
         let len = self.transport.get32() as usize;
-        assert!(len <= buf.len(), "payload too large for buffer");
 
         // payload
-        for b in buf[..len].iter_mut() {
-            *b = self.transport.get8();
+        let mut buf = Vec::with_capacity(len);
+        for _ in 0..len {
+            buf.push(self.transport.get8());
         }
 
         // consume footer zeros
@@ -169,6 +171,6 @@ impl<T: Transport> Framer<T> {
             self.transport.get32();
         }
 
-        &buf[..len]
+        buf
     }
 }

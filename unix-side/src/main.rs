@@ -6,7 +6,6 @@ use std::io::Write as _;
 fn main() {
     let uart = tty::Tty::open(None, BAUD_RATE);
     let mut framer = Framer::unix_side(uart);
-    let mut buf = [0u8; 1024];
 
     let messages = ["hello pi!", "how are you?", "lispi is cool", "goodbye"];
 
@@ -15,9 +14,9 @@ fn main() {
         std::io::stdout().flush().unwrap();
 
         framer.send(msg.as_bytes());
-        let response = framer.recv(&mut buf);
+        let response = framer.recv();
 
-        match std::str::from_utf8(response) {
+        match std::str::from_utf8(&response) {
             Ok(s) => println!("  pi -> unix: {}", s),
             Err(_) => println!("  pi -> unix: {:?}", response),
         }

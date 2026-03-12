@@ -43,16 +43,15 @@ fn main() {
     println!("pi-side: echo server ready\n");
 
     let mut framer = Framer::pi_side(PiUart);
-    let mut buf = [0u8; 1024];
     let mut seed: u32 = 0xCAFE;
 
     loop {
-        let payload = framer.recv(&mut buf);
+        let payload = framer.recv();
         seed = hash_u32(seed);
 
         // build response: original payload + " [rand=0xXXXXXXXX]"
         let mut response: Vec<u8> = Vec::new();
-        response.extend_from_slice(payload);
+        response.extend_from_slice(&payload);
         let suffix = alloc::format!(" [rand=0x{:08x}]", seed);
         response.extend_from_slice(suffix.as_bytes());
 
