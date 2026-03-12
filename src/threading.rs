@@ -109,6 +109,7 @@ extern "C" fn thread_dispatch() {
 /// do brain surgery to set up the stack and registers so that when
 /// the thread is dispatched it will start executing at the entrypoint
 /// and then jump to the thread end trampoline when it returns
+#[allow(dead_code)]
 pub fn thread_push(entrypoint: extern "C" fn()) {
     let mut tcb = ThreadControlBlock::default();
     // allocate a stack for the thread
@@ -203,6 +204,7 @@ pub extern "C" fn thread_done() {
 /// a normal function to the caller, and we will eat up the stack and capture
 /// registers in the handler
 #[unsafe(naked)]
+#[allow(dead_code)]
 pub extern "C" fn thread_join() {
     core::arch::naked_asm!(
         "mrs r1, cpsr", // store the caller's cpsr in r1, which we will restore in the handler
@@ -240,6 +242,7 @@ extern "C" fn thread_end_trampoline() {
 
 /// ASSUMES: USER mode
 /// voluntarily yield control
+#[allow(dead_code)]
 pub extern "C" fn thread_yield() {
     unsafe {
         core::arch::asm!(swi!(0));
