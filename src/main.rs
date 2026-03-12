@@ -17,6 +17,9 @@ mod language;
 extern crate alloc;
 
 fn main() {
-    let test = language::parse("(+ 1 (- 12 @dsb))").unwrap();
-    println!("Goodbye, world! {}\n", test);
+    let mut img = language::Image::new();
+    let test = language::parse("(+ 1 (- 12 8))").unwrap();
+    let (result, _) = language::evaluate(test.into(), &mut img).unwrap();
+
+    println!("Goodbye, world! {}\n", result);
 }

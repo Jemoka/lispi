@@ -344,6 +344,7 @@ pub fn parse(input: &str) -> Result<Value, &'static str> {
 
 /// Parse one value and return both the value and remaining input.
 /// Useful for REPL-style incremental parsing.
+#[allow(unused)]
 pub fn parse_with_rest(input: &str) -> Result<(Value, &str), &'static str> {
     let (rest, val) = parse_value(input).map_err(|_| "Parse error.")?;
     Ok((val, rest))

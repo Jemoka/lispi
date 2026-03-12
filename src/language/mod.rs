@@ -9,3 +9,5 @@ pub mod syscalls;
 
 pub use execute::evaluate;
 pub use parse::{parse, parse_with_rest};
+pub use environment::Image;
+
