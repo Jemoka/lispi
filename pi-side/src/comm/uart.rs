@@ -1,5 +1,6 @@
 use crate::comm::gpio::{self, GpioFunc};
-use crate::utils::memory::{dmb, get32, put32};
+use crate::utils::memory::dmb;
+use crate::utils::memory;
 
 const AUX_ENABLES: usize = 0x2021_5004;
 const AUX_MU_IO_REG: usize = 0x2021_5040;
@@ -22,25 +23,25 @@ pub fn init() {
         dmb();
 
         // enable mini-UART (AUX bit 0)
-        let enables = get32(AUX_ENABLES);
-        put32(AUX_ENABLES, enables | 1);
+        let enables = memory::get32(AUX_ENABLES);
+        memory::put32(AUX_ENABLES, enables | 1);
         dmb();
 
         // disable tx/rx while we configure
-        put32(AUX_MU_CNTL_REG, 0);
+        memory::put32(AUX_MU_CNTL_REG, 0);
         // disable interrupts
-        put32(AUX_MU_IER_REG, 0);
+        memory::put32(AUX_MU_IER_REG, 0);
         // clear FIFOs
-        put32(AUX_MU_IIR_REG, 0b110);
+        memory::put32(AUX_MU_IIR_REG, 0b110);
         // clear MCR
-        put32(AUX_MU_MCR_REG, 0);
+        memory::put32(AUX_MU_MCR_REG, 0);
         // 8-bit mode
-        put32(AUX_MU_LCR_REG, 0b11);
+        memory::put32(AUX_MU_LCR_REG, 0b11);
         // 115200 baud: baudrate = system_clock / (8 * (reg + 1))
         // 250MHz / (8 * 271) = ~115200
-        put32(AUX_MU_BAUD, 270);
+        memory::put32(AUX_MU_BAUD, 270);
         // enable tx and rx
-        put32(AUX_MU_CNTL_REG, 0b11);
+        memory::put32(AUX_MU_CNTL_REG, 0b11);
         dmb();
     }
 }
@@ -49,8 +50,8 @@ pub fn init() {
 pub fn disable() {
     flush_tx();
     unsafe {
-        let enables = get32(AUX_ENABLES);
-        put32(AUX_ENABLES, enables & !1);
+        let enables = memory::get32(AUX_ENABLES);
+        memory::put32(AUX_ENABLES, enables & !1);
     }
 }
 
@@ -59,8 +60,8 @@ pub fn get8() -> u8 {
     unsafe {
         dmb();
         // bit 0 of STAT = symbol available
-        while (get32(AUX_MU_STAT_REG) & 1) == 0 {}
-        let r = get32(AUX_MU_IO_REG) & 0xFF;
+        while (memory::get32(AUX_MU_STAT_REG) & 1) == 0 {}
+        let r = memory::get32(AUX_MU_IO_REG) & 0xFF;
         dmb();
         r as u8
     }
@@ -73,12 +74,12 @@ pub fn get8_async() -> Option<u8> {
 
 /// Returns true if the RX FIFO has at least one byte.
 pub fn has_data() -> bool {
-    unsafe { (get32(AUX_MU_STAT_REG) & 1) != 0 }
+    unsafe { (memory::get32(AUX_MU_STAT_REG) & 1) != 0 }
 }
 
 /// Returns true if the TX FIFO has room for at least one byte.
 pub fn can_put8() -> bool {
-    unsafe { (get32(AUX_MU_STAT_REG) & 0b10) != 0 }
+    unsafe { (memory::get32(AUX_MU_STAT_REG) & 0b10) != 0 }
 }
 
 /// Write one byte to the TX FIFO, blocking until space is available.
@@ -86,14 +87,14 @@ pub fn put8(c: u8) {
     unsafe {
         dmb();
         while !can_put8() {}
-        put32(AUX_MU_IO_REG, c as u32);
+        memory::put32(AUX_MU_IO_REG, c as u32);
         dmb();
     }
 }
 
 /// Returns true if the TX FIFO is empty AND the transmitter is idle.
 pub fn tx_is_empty() -> bool {
-    unsafe { (get32(AUX_MU_LSR_REG) & (1 << 6)) != 0 }
+    unsafe { (memory::get32(AUX_MU_LSR_REG) & (1 << 6)) != 0 }
 }
 
 /// Block until all TX bytes have been transmitted.
@@ -119,4 +120,18 @@ pub fn read_bytes(buf: &mut [u8]) {
     for b in buf.iter_mut() {
         *b = get8();
     }
+}
+
+pub fn put32(v: u32) {
+    for &b in &v.to_le_bytes() {
+        put8(b);
+    }
+}
+
+pub fn get32() -> u32 {
+    let mut bytes = [0u8; 4];
+    for b in &mut bytes {
+        *b = get8();
+    }
+    u32::from_le_bytes(bytes)
 }

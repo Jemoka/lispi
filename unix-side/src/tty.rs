@@ -51,12 +51,13 @@ impl Tty {
         eprintln!("opened tty port <{}>", device);
         Tty { file }
     }
+}
 
-    pub fn put8(&mut self, b: u8) {
+impl shared::Transport for Tty {
+    fn put8(&mut self, b: u8) {
         self.file.write_all(&[b]).expect("tty write failed");
     }
-
-    pub fn get8(&mut self) -> u8 {
+    fn get8(&mut self) -> u8 {
         let mut buf = [0u8; 1];
         match self.file.read_exact(&mut buf) {
             Ok(()) => buf[0],

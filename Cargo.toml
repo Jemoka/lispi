@@ -1,5 +1,5 @@
 [workspace]
-members = ["pi-side", "unix-side"]
+members = ["shared", "pi-side", "unix-side"]
 resolver = "3"
 
 [profile.dev]
