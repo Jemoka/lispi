@@ -6,7 +6,6 @@ rustflags = [
     "-C", "link-arg=-z noexecstack",
     "-C", "link-arg=--gc-sections",
     "-C", "link-arg=-nostdlib",
-    "-C", "link-arg=-Tmemory.ld",
     "-C", "link-arg=--fix-arm1176",
     "-C", "link-arg=--use-blx"
 ]
@@ -17,7 +16,3 @@ linker = "arm-none-eabi-ld"
 json-target-spec = true
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
-
-[profile]
-dev.panic = "abort"
-release.panic = "abort"

@@ -6,6 +6,7 @@ use super::ast::Value;
 use super::environment::{Environment, Image};
 use super::execute::evaluate;
 
+use crate::comm::uart;
 use crate::utils::memory::{dsb, get32, prefetch_flush, put32};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -14,6 +15,9 @@ pub enum Syscall {
     Put32,
     DSB,
     PrefetchFlush,
+    UartInit,
+    UartPut8,
+    UartGet8,
 }
 
 impl Syscall {
@@ -31,6 +35,15 @@ impl Syscall {
         }
         if name.eq_ignore_ascii_case("prefetch_flush") {
             return Some(Self::PrefetchFlush);
+        }
+        if name.eq_ignore_ascii_case("uart/init") {
+            return Some(Self::UartInit);
+        }
+        if name.eq_ignore_ascii_case("uart/put8") {
+            return Some(Self::UartPut8);
+        }
+        if name.eq_ignore_ascii_case("uart/get8") {
+            return Some(Self::UartGet8);
         }
         None
     }
@@ -91,6 +104,24 @@ pub fn execute_syscall(
         Syscall::PrefetchFlush => {
             prefetch_flush();
             Ok((Value::Nil, env))
+        }
+        Syscall::UartInit => {
+            uart::init();
+            Ok((Value::Nil, env))
+        }
+        Syscall::UartPut8 => {
+            let val = evaluate(sexp.nth(1), image)?.0;
+            if let Value::Number(n) = &val {
+                let byte = n.as_i32().map_err(|_| "uart/put8: argument must be an integer.")?;
+                uart::put8(byte as u8);
+                Ok((Value::Nil, env))
+            } else {
+                Err("uart/put8 requires a number argument.")
+            }
+        }
+        Syscall::UartGet8 => {
+            let byte = uart::get8();
+            Ok((Value::Number(super::number::Number::Integer(byte as i32)), env))
         }
     }
 }
