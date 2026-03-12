@@ -4,13 +4,14 @@ use alloc::rc::Rc;
 
 use super::ast::Value;
 use super::environment::{Environment, Image};
+use super::execute::evaluate;
 
 use crate::utils::memory::{dsb, get32, prefetch_flush, put32};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Syscall {
     Get32,
-    Set32,
+    Put32,
     DSB,
     PrefetchFlush,
 }
@@ -22,8 +23,8 @@ impl Syscall {
         if name.eq_ignore_ascii_case("get32") {
             return Some(Self::Get32);
         }
-        if name.eq_ignore_ascii_case("set32") {
-            return Some(Self::Set32);
+        if name.eq_ignore_ascii_case("put32") {
+            return Some(Self::Put32);
         }
         if name.eq_ignore_ascii_case("dsb") {
             return Some(Self::DSB);
@@ -43,12 +44,11 @@ pub fn execute_syscall(
     let env = image.e.clone();
     match syscall {
         Syscall::Get32 => {
-            let addr = sexp.nth(1);
-            if let Value::Number(n) = &*addr {
+            let addr = evaluate(sexp.nth(1), image)?.0;
+            if let Value::Number(n) = &addr {
                 let raw_addr = n
                     .as_addr()
                     .map_err(|_| "GET32: argument must be an address or non-negative integer.")?;
-                // raw_addr is Number::Addr(usize), extract the usize
                 if let super::number::Number::Addr(a) = raw_addr {
                     let val = unsafe { get32(a) };
                     Ok((
@@ -62,16 +62,16 @@ pub fn execute_syscall(
                 Err("GET32 requires a number argument.")
             }
         }
-        Syscall::Set32 => {
-            let addr_val = sexp.nth(1);
-            let val_val = sexp.nth(2);
-            if let (Value::Number(n_addr), Value::Number(n_val)) = (&*addr_val, &*val_val) {
+        Syscall::Put32 => {
+            let addr_val = evaluate(sexp.nth(1), image)?.0;
+            let val_val = evaluate(sexp.nth(2), image)?.0;
+            if let (Value::Number(n_addr), Value::Number(n_val)) = (&addr_val, &val_val) {
                 let raw_addr = n_addr.as_addr().map_err(
-                    |_| "SET32: first argument must be an address or non-negative integer.",
+                    |_| "PUT32: first argument must be an address or non-negative integer.",
                 )?;
                 let raw_val = n_val
                     .as_i32()
-                    .map_err(|_| "SET32: second argument must be an integer.")?;
+                    .map_err(|_| "PUT32: second argument must be an integer.")?;
                 if let super::number::Number::Addr(a) = raw_addr {
                     unsafe { put32(a, raw_val as u32) };
                     prefetch_flush();
@@ -81,7 +81,7 @@ pub fn execute_syscall(
                     unreachable!()
                 }
             } else {
-                Err("SET32 requires two number arguments.")
+                Err("PUT32 requires two number arguments.")
             }
         }
         Syscall::DSB => {

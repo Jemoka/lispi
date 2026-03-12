@@ -18,8 +18,23 @@ extern crate alloc;
 
 fn main() {
     let mut img = language::Image::new();
-    let test = language::parse("(+ 1 (- 12 8))").unwrap();
-    let (result, _) = language::evaluate(test.into(), &mut img).unwrap();
+    let _ = language::evaluate(
+        language::parse("(set chicken (+ 12 (- 8 3)))")
+            .unwrap()
+            .into(),
+        &mut img,
+    )
+    .unwrap();
+    let _ = language::evaluate(
+        language::parse("(@put32 #0x80000 chicken)").unwrap().into(),
+        &mut img,
+    )
+    .unwrap();
+    let (result3, _) = language::evaluate(
+        language::parse("(@get32 #0x80000)").unwrap().into(),
+        &mut img,
+    )
+    .unwrap();
 
-    println!("Goodbye, world! {}\n", result);
+    println!("Goodbye, world! {}\n", result3);
 }

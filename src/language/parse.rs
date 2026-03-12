@@ -5,9 +5,11 @@
 //! Syntax:
 //!   (a b c)              — list (cons chain ending in nil)
 //!   '(a b c)             — quote sugar: desugars to (list a b c)
-//!   @name                — syscall (case-insensitive): get32, set32, dsb, prefetch_flush
-//!   #FF                  — address literal (hex digits)
-//!   42  -7               — integer
+//!   @name                — syscall (case-insensitive): get32, put32, dsb, prefetch_flush
+//!   #42  #0xFF  #0b101   — address literal (decimal, 0x hex, 0b binary)
+//!   42  -7               — integer (decimal)
+//!   0xFF                 — integer (hex)
+//!   0b1010               — integer (binary)
 //!   3.14  -0.5           — float
 //!   "hello"              — string (supports \n \t \\ \")
 //!   + - * / > < ~ | &   — operator specials
@@ -92,16 +94,32 @@ fn parse_string(input: &str) -> IResult<&str, Value> {
     }
 }
 
-/// Parse #hex_digits as Number::Addr.
+/// Parse `#` address literals.
+/// `#0xFF` → hex, `#0b101` → binary, `#42` → decimal.
 fn parse_address(input: &str) -> IResult<&str, Value> {
     let (rest, _) = char('#')(input)?;
-    let (rest, digits) = hex_digit1(rest)?;
-    let addr = usize::from_str_radix(digits, 16).map_err(|_| {
+    let make_err = || {
         nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::HexDigit,
         ))
-    })?;
+    };
+    let (rest, addr) = if rest.starts_with("0x") || rest.starts_with("0X") {
+        let r = &rest[2..];
+        let (r, digits) = hex_digit1(r)?;
+        let v = usize::from_str_radix(digits, 16).map_err(|_| make_err())?;
+        (r, v)
+    } else if rest.starts_with("0b") || rest.starts_with("0B") {
+        let r = &rest[2..];
+        let (r, digits) = take_while1(|c: char| c == '0' || c == '1')(r)?;
+        let v = usize::from_str_radix(digits, 2).map_err(|_| make_err())?;
+        (r, v)
+    } else {
+        // Decimal: #42 means address 42
+        let (r, digits) = digit1(rest)?;
+        let v: usize = digits.parse().map_err(|_| make_err())?;
+        (r, v)
+    };
     Ok((rest, Value::Number(Number::Addr(addr))))
 }
 
@@ -119,7 +137,48 @@ fn parse_float(input: &str) -> IResult<&str, Value> {
     Ok((rest, Value::Number(Number::Float(f))))
 }
 
-/// Parse an integer literal: [-]digits
+/// Parse a hex integer: 0xFF or 0XFF
+fn parse_hex_integer(input: &str) -> IResult<&str, Value> {
+    let start = input;
+    let (i, neg) = opt(char('-')).parse(input)?;
+    if !(i.starts_with("0x") || i.starts_with("0X")) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    let i = &i[2..];
+    let (rest, digits) = hex_digit1(i)?;
+    let v = i32::from_str_radix(digits, 16).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(
+            start,
+            nom::error::ErrorKind::HexDigit,
+        ))
+    })?;
+    let v = if neg.is_some() { -v } else { v };
+    Ok((rest, Value::Number(Number::Integer(v))))
+}
+
+/// Parse a binary integer: 0b0110 or 0B0110
+fn parse_bin_integer(input: &str) -> IResult<&str, Value> {
+    let start = input;
+    let (i, neg) = opt(char('-')).parse(input)?;
+    if !(i.starts_with("0b") || i.starts_with("0B")) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    let i = &i[2..];
+    let (rest, digits) = take_while1(|c: char| c == '0' || c == '1')(i)?;
+    let v = i32::from_str_radix(digits, 2).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(start, nom::error::ErrorKind::Digit))
+    })?;
+    let v = if neg.is_some() { -v } else { v };
+    Ok((rest, Value::Number(Number::Integer(v))))
+}
+
+/// Parse a decimal integer literal: [-]digits
 fn parse_integer(input: &str) -> IResult<&str, Value> {
     let start = input;
     let (i, _) = opt(char('-')).parse(input)?;
@@ -131,9 +190,15 @@ fn parse_integer(input: &str) -> IResult<&str, Value> {
     Ok((rest, Value::Number(Number::Integer(i))))
 }
 
-/// Parse a number: try float first (has `.`), then integer.
+/// Parse a number: try hex/binary first (0x/0b prefixes), then float, then decimal integer.
 fn parse_number(input: &str) -> IResult<&str, Value> {
-    alt((parse_float, parse_integer)).parse(input)
+    alt((
+        parse_hex_integer,
+        parse_bin_integer,
+        parse_float,
+        parse_integer,
+    ))
+    .parse(input)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +251,18 @@ fn parse_quote(input: &str) -> IResult<&str, Value> {
 // lists
 // ---------------------------------------------------------------------------
 
+/// Check if a symbol matches the c[ad]{2,}r pattern (case-insensitive).
+/// `car`/`cdr` (single middle char) are already Special forms and won't reach here.
+fn is_cxr_pattern(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 4
+        && b[0].eq_ignore_ascii_case(&b'c')
+        && b[b.len() - 1].eq_ignore_ascii_case(&b'r')
+        && b[1..b.len() - 1]
+            .iter()
+            .all(|c| c.eq_ignore_ascii_case(&b'a') || c.eq_ignore_ascii_case(&b'd'))
+}
+
 /// Parse a parenthesised list: ( value* )
 fn parse_list(input: &str) -> IResult<&str, Value> {
     let (mut rest, _) = char('(')(input)?;
@@ -206,6 +283,30 @@ fn parse_list(input: &str) -> IResult<&str, Value> {
         let (r, val) = parse_value(rest)?;
         items.push(val);
         rest = r;
+    }
+
+    // desugar c[ad]+r: (cadr x) → (car (cdr x))
+    if items.len() == 2 {
+        let is_cxr = matches!(&items[0], Value::Symbol(sym) if is_cxr_pattern(sym.as_str()));
+        if is_cxr {
+            let head = items.remove(0);
+            let arg = items.remove(0);
+            let sym = match head {
+                Value::Symbol(s) => s,
+                _ => unreachable!(),
+            };
+            let mut result = arg;
+            let s = sym.as_str();
+            for b in s[1..s.len() - 1].bytes().rev() {
+                let special = if b.eq_ignore_ascii_case(&b'a') {
+                    Special::Car
+                } else {
+                    Special::Cdr
+                };
+                result = Value::cons(Value::Special(special), Value::cons(result, Value::Nil));
+            }
+            return Ok((rest, result));
+        }
     }
 
     // build cons list from items (right fold)
@@ -336,16 +437,16 @@ fn parse_value(input: &str) -> IResult<&str, Value> {
 }
 
 /// Public entry point: parse one value from the input.
-/// Returns the parsed Value, or an error string on failure.
-pub fn parse(input: &str) -> Result<Value, &'static str> {
-    let (_, val) = parse_value(input).map_err(|_| "Parse error.")?;
+/// Returns the parsed Value, or a descriptive error string on failure.
+pub fn parse(input: &str) -> Result<Value, AllocString> {
+    let (_, val) = parse_value(input).map_err(|e| AllocString::from(alloc::format!("{}", e)))?;
     Ok(val)
 }
 
 /// Parse one value and return both the value and remaining input.
 /// Useful for REPL-style incremental parsing.
 #[allow(unused)]
-pub fn parse_with_rest(input: &str) -> Result<(Value, &str), &'static str> {
-    let (rest, val) = parse_value(input).map_err(|_| "Parse error.")?;
+pub fn parse_with_rest(input: &str) -> Result<(Value, &str), AllocString> {
+    let (rest, val) = parse_value(input).map_err(|e| AllocString::from(alloc::format!("{}", e)))?;
     Ok((val, rest))
 }

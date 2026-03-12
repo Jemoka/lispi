@@ -7,7 +7,6 @@ pub mod parse;
 pub mod special;
 pub mod syscalls;
 
+pub use environment::Image;
 pub use execute::evaluate;
 pub use parse::parse;
-pub use environment::Image;
-
