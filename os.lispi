@@ -268,7 +268,6 @@
 
 ;;; framebuffer drawing ;;;
 ;; give preturb the input array with a row of the given colour
-;; | ~(fullidx target offset n val)~   | Fill n slots starting at offset with val.         |
 (defun drawing/row (img x y w width color)
   (fullidx img (+ (* y width) x) w color))
 
