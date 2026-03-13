@@ -1,0 +1,187 @@
+#+TITLE: Lispi Language Reference
+#+STARTUP: showall
+
+* Types
+
+| Type    | Literal syntax            | Description                         |
+|---------+---------------------------+-------------------------------------|
+| Integer | ~42~, ~-7~               | Signed 32-bit integer               |
+| Unsigned| ~u42~                    | Unsigned 32-bit integer             |
+| Addr    | ~#0x20200000~            | Raw memory address                  |
+| Bool    | ~true~, ~false~          | Boolean                             |
+| Nil     | ~nil~                    | Empty list / false                  |
+| Cons    | ~'(1 2 3)~               | Linked list (cons cells)            |
+| String  | ~"hello"~                | String                              |
+| Array   | via ~(fill n val)~       | Mutable u32 vector (Rust Vec<u32>)  |
+| Closure | via ~lambda~ / ~defun~   | Function with captured environment  |
+| Macro   | via ~defmacro~           | Syntax transformer                  |
+
+** Number arithmetic rules
+- Int op Int → Int
+- Unsigned op Unsigned → Unsigned
+- Mixed Int/Unsigned → Unsigned (promotes)
+- Addr +/- Int or Unsigned → Addr (pointer offset)
+- Addr - Addr → Int (distance)
+- Addr * or / anything → error
+
+* Special Forms
+
+** Binding & Functions
+
+| Form                          | Description                                          |
+|-------------------------------+------------------------------------------------------|
+| ~(set name value)~            | Bind name to value. Mutates existing binding if any. |
+| ~(let (a 1 b 2) body)~       | Local bindings; earlier bindings visible to later.   |
+| ~(defun name (params) body)~  | Define a named function. Desugars to set + lambda.   |
+| ~(lambda (params) body)~      | Create a closure. Alias: ~fn~.                       |
+| ~(defmacro name (params) body)~ | Define a macro.                                    |
+| ~(macroexpand (macro-call))~  | Expand a macro without executing.                    |
+
+** Control Flow
+
+| Form                      | Description                                  |
+|---------------------------+----------------------------------------------|
+| ~(if cond then else)~     | Conditional. Evaluates then or else branch.  |
+| ~(begin e1 e2 ... en)~   | Evaluate forms in sequence, return last.     |
+
+** Arithmetic (binary, all return Number)
+
+| Form       | Alias | Description      |
+|------------+-------+------------------|
+| ~(add a b)~ | ~+~   | Addition         |
+| ~(sub a b)~ | ~-~   | Subtraction      |
+| ~(mul a b)~ | ~*~   | Multiplication   |
+| ~(div a b)~ | ~/~   | Division         |
+| ~(mod a b)~ | ~%~   | Modulo           |
+
+** Bitwise
+
+| Form            | Alias | Description            |
+|-----------------+-------+------------------------|
+| ~(lshift a b)~  | ~<<~  | Left shift             |
+| ~(rshift a b)~  | ~>>~  | Right shift            |
+| ~(binnot a)~    | =~=   | Bitwise NOT            |
+| ~(binor a b)~   | =\vert=   | Bitwise OR             |
+| ~(binand a b)~  | ~&~   | Bitwise AND            |
+
+** Comparison
+
+| Form        | Alias | Description              |
+|-------------+-------+--------------------------|
+| ~(eq a b)~  |       | Equality                 |
+| ~(gt a b)~  | ~>~   | Greater than             |
+| ~(lt a b)~  | ~<~   | Less than                |
+| ~(gte a b)~ | ~>=~  | Greater than or equal    |
+| ~(lte a b)~ | ~<=~  | Less than or equal       |
+
+** Logic (short-circuit)
+
+| Form          | Description                                       |
+|---------------+---------------------------------------------------|
+| ~(not a)~     | Logical NOT.                                      |
+| ~(and a b)~   | If a is falsy return a, else evaluate and return b. |
+| ~(or a b)~    | If a is truthy return a, else evaluate and return b.|
+| ~(xor a b)~   | True iff exactly one is truthy.                   |
+
+** List Operations
+
+| Form              | Description                                    |
+|-------------------+------------------------------------------------|
+| ~(cons a b)~      | Construct a cons cell.                         |
+| ~(car l)~         | First element of a cons cell.                  |
+| ~(cdr l)~         | Rest of a cons cell.                           |
+| ~(list a b ...)~  | Variadic; construct a list from arguments.     |
+| ~(nullp x)~       | True if x is nil. Alias: ~null?~.              |
+
+** Type Conversions
+
+| Form            | Description                                        |
+|-----------------+----------------------------------------------------|
+| ~(addr x)~      | Convert number to Addr type.                      |
+| ~(signed x)~    | Convert number to signed Integer.                 |
+| ~(unsigned x)~  | Convert number to Unsigned.                       |
+
+** Arrays
+
+| Form                    | Description                                          |
+|-------------------------+------------------------------------------------------|
+| Form                    | Description                                          |
+|-------------------------+------------------------------------------------------|
+| ~(array list)~          | Convert a list of numbers to an Array.               |
+| ~(unpack array)~        | Convert an Array back to a list.                     |
+| ~(full n value)~        | Create a new Array of n copies of value.             |
+
+** Indexed Operations (work on both Array and Addr)
+
+These operations accept either an Array or a heap Addr as the first argument.
+With an Array, they are bounds-checked and mutate the backing Vec in place.
+With an Addr (from ~@alloc32~ or similar), they read/write raw memory at ~addr + index * 4~.
+
+| Form                              | Description                                       |
+|------------------------------------+---------------------------------------------------|
+| ~(getidx target n)~               | Read u32 at index n.                              |
+| ~(putidx target n val)~           | Write u32 at index n.                             |
+| ~(readidx target offset n)~       | Read n elements from offset into a list.          |
+| ~(fillidx target offset list)~    | Write list values starting at offset.             |
+| ~(fullidx target offset n val)~   | Fill n slots starting at offset with val.         |
+
+* Syscalls
+
+Syscalls are prefixed with ~@~ and provide direct hardware access.
+
+** Memory-Mapped I/O (volatile, for device registers)
+
+| Syscall                      | Description                                      |
+|------------------------------+--------------------------------------------------|
+| ~(@get32 addr)~              | Read u32 from address (volatile).                |
+| ~(@put32 addr value)~        | Write u32 to address (volatile).                 |
+
+** Bulk Memory — list-based
+
+These walk a lisp list and issue individual reads/writes.
+Parallel to the indexed ops above, but operate on raw addresses only.
+
+| Syscall                       | Description                                       |
+|-------------------------------+---------------------------------------------------|
+| ~(@read32 addr offset n)~     | Read n u32 slots → list. Starts at addr+offset*4. |
+| ~(@zero32 addr offset n)~     | Zero n u32 slots starting at addr+offset*4.       |
+| ~(@fill32 addr offset list)~  | Write list values to consecutive u32 slots.       |
+| ~(@full32 addr offset n val)~ | Fill n u32 slots with val (~slice::fill~).        |
+
+** Bulk Memory — array-based (memcpy)
+
+These use ~copy_nonoverlapping~ for maximum throughput.
+Parallel to the list-based ops above, but transfer entire Arrays in one shot.
+
+| Syscall                    | Description                                           |
+|----------------------------+-------------------------------------------------------|
+| ~(@ldr addr offset n)~     | Load n u32 slots → Array (~copy_nonoverlapping~).     |
+| ~(@str addr offset array)~ | Store Array to addr+offset*4 (~copy_nonoverlapping~). |
+
+** Memory Barriers
+
+| Syscall               | Description                  |
+|-----------------------+------------------------------|
+| ~(@dsb)~              | Data synchronization barrier.|
+| ~(@prefetch_flush)~   | Prefetch flush.              |
+
+** Heap Allocation
+
+| Syscall                         | Description                                  |
+|---------------------------------+----------------------------------------------|
+| ~(@alloc32 n [align])~          | Allocate n u32 slots (zeroed). Returns addr. |
+| ~(@free32 addr n [align])~      | Free a previous alloc32.                     |
+
+** UART
+
+| Syscall            | Description                      |
+|--------------------+----------------------------------|
+| ~(@uart/init)~     | Initialize UART.                 |
+| ~(@uart/put8 val)~ | Write a byte to UART.            |
+| ~(@uart/get8)~     | Read a byte from UART (blocks).  |
+
+** Timing
+
+| Syscall              | Description                                    |
+|----------------------+------------------------------------------------|
+| ~(@delay n)~         | Busy-wait loop; n iterations of a nop.         |

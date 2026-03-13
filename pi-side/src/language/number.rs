@@ -46,21 +46,21 @@ impl Number {
         }
     }
 
-    /// Extract the inner i32, or cast from unsigned. Error for addr.
+    /// Extract the inner i32, or cast from unsigned/addr.
     pub fn as_i32(&self) -> Result<i32, &'static str> {
         match self {
             Number::Integer(i) => Ok(*i),
             Number::Unsigned(u) => Ok(*u as i32),
-            Number::Addr(_) => Err("Expected integer."),
+            Number::Addr(a) => Ok(*a as i32),
         }
     }
 
-    /// Extract the inner u32, or cast from integer. Error for addr.
+    /// Extract the inner u32, or cast from integer/addr.
     pub fn as_u32(&self) -> Result<u32, &'static str> {
         match self {
             Number::Unsigned(u) => Ok(*u),
             Number::Integer(i) => Ok(*i as u32),
-            Number::Addr(_) => Err("Expected unsigned integer."),
+            Number::Addr(a) => Ok(*a as u32),
         }
     }
 

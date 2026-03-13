@@ -123,6 +123,26 @@
 
 ;;;; Sending expressions
 
+(defun lispi--strip-comments (str)
+  "Remove ; line-comments from STR, respecting string literals."
+  (let ((lines (split-string str "\n")))
+    (mapconcat
+     (lambda (line)
+       (let ((i 0) (in-str nil) (len (length line)))
+         (while (< i len)
+           (let ((ch (aref line i)))
+             (cond
+              ((and (not in-str) (= ch ?\;))
+               (setq len i))
+              ((= ch ?\")
+               (setq in-str (not in-str))
+               (setq i (1+ i)))
+              ((and in-str (= ch ?\\))
+               (setq i (+ i 2)))
+              (t (setq i (1+ i))))))
+         (substring line 0 len)))
+     lines " ")))
+
 (defun lispi--send (expr callback)
   "Send EXPR string to the subprocess, call CALLBACK with the result."
   (unless (and lispi--process (process-live-p lispi--process))
@@ -133,8 +153,9 @@
     (user-error "lispi: evaluation already in progress"))
   (setq lispi--callback callback)
   ;; The binary reads one line at a time, so collapse multi-line
-  ;; expressions into a single line.
-  (let ((one-line (replace-regexp-in-string "[\n\r]+" " " (string-trim expr))))
+  ;; expressions into a single line.  Strip ; comments first so they
+  ;; don't swallow the rest of the expression after newline removal.
+  (let ((one-line (string-trim (lispi--strip-comments expr))))
     (process-send-string lispi--process (concat one-line "\n"))))
 
 ;;;; Overlays

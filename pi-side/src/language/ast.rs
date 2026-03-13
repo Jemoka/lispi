@@ -2,7 +2,9 @@
 
 use alloc::rc::Rc;
 use alloc::string::String as AllocString;
+use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::fmt;
 use heapless::String;
 
@@ -51,6 +53,7 @@ pub enum Value {
     String(AllocString),
     Macro(Macro),
     Syscall(Syscall),
+    Array(Rc<RefCell<Vec<u32>>>),
 }
 
 impl Value {
@@ -60,6 +63,14 @@ impl Value {
 
     pub fn cons(car: Value, cdr: Value) -> Self {
         Value::Cons(Rc::new(car), Rc::new(cdr))
+    }
+
+    pub fn array(v: Vec<u32>) -> Self {
+        Value::Array(Rc::new(RefCell::new(v)))
+    }
+
+    pub fn array_fill(n: usize, val: u32) -> Self {
+        Value::Array(Rc::new(RefCell::new(vec![val; n])))
     }
 
     pub fn car(&self) -> Rc<Value> {
@@ -118,6 +129,7 @@ impl fmt::Display for Value {
             Value::Closure(_) => write!(f, "<closure>"),
             Value::Macro(_) => write!(f, "<macro>"),
             Value::Syscall(s) => write!(f, "<syscall:{:?}>", s),
+            Value::Array(a) => write!(f, "<array:{}>", a.borrow().len()),
             Value::Cons(_, _) => {
                 write!(f, "(")?;
                 let mut current: &Value = self;

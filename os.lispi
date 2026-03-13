@@ -17,8 +17,25 @@
     (if (f (car l))
         (cons (car l) (filter f (cdr l)))
       (filter f (cdr l)))))
+(defun while (cond body)
+  (if (cond)
+      (begin
+       body
+       (while cond body))
+    nil))
+(defun identity (x) x)
+(defun repeat (n val)
+  (if (eq n 0) nil
+    (cons val (repeat (- n 1) val))))
 
-;;;; gpio ;;;
+;;;; buffer management ;;;;
+;; getidx/putidx/readidx/fillidx work on both Arrays and Addrs
+;; for bulk memcpy to/from hardware: @ldr, @str
+(defun max (a b)
+  (if (> a b) a b))
+
+
+;;;; gpio ;;;;
 (set gpio/BASE #0x20200000)
 (set gpio/fsel-offsets '(0x00 0x04 0x08 0x0c 0x10 0x14))
 (set gpio/FSEL (map (lambda (x) (+ gpio/BASE x)) gpio/fsel-offsets))
@@ -75,4 +92,197 @@
                 (@get32 (+ gpio/LEV0 (* group 4)))
                 (<< 1 offset))))))
 
+;;;; gpio examples ;;;;
+(gpio/set-output 20)
+(defun blink (n)
+  (if (not (eq n 0))
+      (begin
+       (gpio/set-on 20)
+       (@delay 7000000)
+       (gpio/set-off 20)
+       (@delay 7000000)
+       (blink (- n 1)))
+    nil))
+(gpio/set-on 20)
+(gpio/set-off 20)
 
+
+;;;; mailbox ;;;;
+;; physical address to GPU address
+(defun p2g (cp)
+  (addr (binor (binand (unsigned cp) 0x3fffffff) 0x40000000)))
+(defun g2p (cp)
+  (addr (binand (unsigned cp) 0x3fffffff)))
+
+(set mbox/RX-SIZE 0)
+(set mbox/TX-SIZE 1)
+(set mbox/TAG 2)
+
+(set mbox/STATUS #0x2000B898)
+(set mbox/READ #0x2000B880)
+(set mbox/WRITE #0x2000B8A0)
+(set mbox/FULL (<< u1 31))
+(set mbox/EMPTY (<< u1 30))
+
+; some mailboxes
+(set mbox/BOARD-MEMORY-SIZE '(8 0 0x00010006))
+(set mbox/BOARD-MODEL '(4 0 0x00010001))
+(set mbox/BOARD-REV '(4 0 0x00010002))
+
+; rw utilities
+(defun mbox/-write (data)
+  (if (binand (@get32 mbox/STATUS) mbox/FULL)
+      (mbox/-write data)
+    (@put32 mbox/WRITE (binor (unsigned (p2g data)) 8))))
+(defun mbox/write (data)
+  (begin 
+   (@dsb)
+   (mbox/-write data)
+   (@dsb)))
+
+(defun mbox/-read ()
+  (if (binand (@get32 mbox/STATUS) mbox/EMPTY)
+      (mbox/-read)
+    (@get32 mbox/READ)))
+
+(defun mbox/read ()
+  (begin
+   (@dsb)
+   (mbox/-read)
+   (@dsb)))
+
+; count total u32 words needed for all tags in a pairs list.
+; each tag occupies: 3 header words (tag-id, buf-size, req-code)
+;                    + sized/4 data words (max of rx and tx size)
+(defun mbox/-tags-nwords (pairs)
+  (if (nullp pairs) 0
+    (let (msg (car (car pairs)))
+      (let (sized (max (nth mbox/RX-SIZE msg)
+                       (nth mbox/TX-SIZE msg)))
+        (+ (+ 3 (/ sized 4))
+           (mbox/-tags-nwords (cdr pairs)))))))
+
+; write each tag's header + payload into buf at word offset.
+; for each (msg tx) pair, writes:
+;   [offset+0] tag id
+;   [offset+1] value buffer size in bytes (max of rx, tx)
+;   [offset+2] 0 (request indicator)
+;   [offset+3..] zeroed data area, then tx values written over it
+; after all pairs: writes a 0 end-tag sentinel.
+(defun mbox/-write-tags (buf offset pairs)
+  (if (nullp pairs)
+      (putidx buf offset 0) ;; end tag
+    (let (msg (car (car pairs))
+              tx (nth 1 (car pairs)))
+      (let (rx-size (nth mbox/RX-SIZE msg)
+                    tx-size (nth mbox/TX-SIZE msg)
+                    tag (nth mbox/TAG msg))
+        (let (sized (max rx-size tx-size))
+          (begin
+           (putidx buf offset tag)
+           (putidx buf (+ offset 1) sized)
+           (putidx buf (+ offset 2) 0)
+           (@zero32 buf (+ offset 3) (/ sized 4))
+           (fillidx buf (+ offset 3) tx)
+           (mbox/-write-tags buf (+ (+ offset 3) (/ sized 4))
+                             (cdr pairs))))))))
+
+; read response data from each tag after the GPU has filled in replies.
+; skips past each tag's 3-word header to read rx-size/4 data words,
+; advancing offset by 3 + sized/4 per tag to stay aligned.
+; returns a list of lists — one response per tag in order.
+(defun mbox/-read-tags (buf offset pairs)
+  (if (nullp pairs) nil
+    (let (msg (car (car pairs)))
+      (let (rx-size (nth mbox/RX-SIZE msg)
+                    sized (max rx-size (nth mbox/TX-SIZE msg)))
+        (cons (readidx buf (+ offset 3) (/ rx-size 4))
+              (mbox/-read-tags buf (+ (+ offset 3) (/ sized 4))
+                               (cdr pairs)))))))
+
+; mailbox talkmany — send multiple tags in one mailbox message.
+; pairs is a list of (msg tx) where msg is (rx-size tx-size tag).
+; assembles a single buffer:
+;   [0] total size in bytes   (2 header + tags + 1 end-tag)
+;   [1] 0 (request code)
+;   [2..] tag blocks written by -write-tags, terminated by 0
+; sends via property mailbox (channel 8), reads response,
+; returns a list of response lists — one per tag in order.
+(defun mbox/talkmany (pairs)
+  (let (nwords (+ (mbox/-tags-nwords pairs) 3)) ;; 2 header + tags + 1 end
+    (let (buf (@alloc32 nwords 16))
+      (begin
+       (putidx buf 0 (* nwords 4))       ;; total size in bytes
+       (putidx buf 1 0)                  ;; request code
+       (mbox/-write-tags buf 2 pairs)   ;; tags start at word 2
+       (mbox/write buf)
+       (mbox/read)
+       (let (out (mbox/-read-tags buf 2 pairs))
+         (begin
+          (@free32 buf nwords 16)
+          out))))))
+
+; mailbox talk — single-tag wrapper around talkmany
+; msg is (rx-size tx-size tag), tx is a list of u32 values
+; returns a list of u32 values from the response
+(defun mbox/talk (msg tx)
+  (car (mbox/talkmany (list (list msg tx)))))
+
+;; talk with no tx data
+(defun mbox/listen (msg)
+  (mbox/talk msg nil))
+
+;;;; simple mailbox example ;;;;
+(addr (car (mbox/listen mbox/BOARD-REV)))
+
+;;;; framebuffer ;;;;
+;; allocation
+(set framebuf/ALLOC '(8 4 0x00040001))
+(set framebuf/DEALLOC '(0 0 0x00048001))
+(set framebuf/DEALLOC '(0 0 0x00048001))
+;; properties
+(set framebuf/PHYSICAL-WH '(8 8 0x00048003))
+(set framebuf/VIRTUAL-WH '(8 8 0x00048004))
+(set framebuf/COLOR-DEPTH '(4 4 0x00048005))
+(set framebuf/PIXEL-ORDER '(4 4 0x00048006))
+
+;; allocate framebuffer with all properties in one mailbox call
+;; returns (base-addr size) from the alloc tag response
+(defun framebuf/alloc ()
+  (let (results (mbox/talkmany
+                 (list (list framebuf/PHYSICAL-WH '(1920 1080))
+                       (list framebuf/VIRTUAL-WH '(1920 1080))
+                       (list framebuf/COLOR-DEPTH '(32))
+                       (list framebuf/PIXEL-ORDER '(1))
+                       (list framebuf/ALLOC '(32)))))
+    (nth 4 results)))
+
+;; pixel layout is [24-31] alpha, [16-23] red, [8-15] green, [0-7] blue
+(defun framebuf/pack-rgb (r g b)
+  (binor (<< r 16) (binor (<< g 8) b)))
+(defun framebuf/unpack-rgb (rgb)
+  (list (binand (>> rgb 16) 0xff)
+        (binand (>> rgb 8) 0xff)
+        (binand rgb 0xff)))
+
+
+;;; framebuffer drawing ;;;
+;; give preturb the input array with a row of the given colour
+;; | ~(fullidx target offset n val)~   | Fill n slots starting at offset with val.         |
+(defun drawing/row (img x y w width color)
+  (fullidx img (+ (* y width) x) w color))
+
+;; give preturb the input array with a rectangle of the
+;; given colour
+(defun drawing/rect (img x y w h width color)
+  (if (eq h 0) nil
+    (begin
+     (drawing/row img x y w width color)
+     (drawing/rect img x (+ y 1) w (- h 1) width color))))
+
+(let (fbuf (framebuf/alloc))
+  (let (base (g2p (addr (car fbuf)))
+             img (full (* 1920 1080) 0))
+    (begin
+     (drawing/rect img 10 10 50 50 1920 (framebuf/pack-rgb 255 0 0))
+     (@str base 0 img))))

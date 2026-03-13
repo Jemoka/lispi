@@ -45,6 +45,14 @@ pub enum Special {
     Rshift,
     Mod,
     Cons,
+    Array,
+    Full,
+    Unpack,
+    GetIdx,
+    PutIdx,
+    ReadIdx,
+    FillIdx,
+    FullIdx,
 }
 
 impl Special {
@@ -156,6 +164,30 @@ impl Special {
         if name.eq_ignore_ascii_case("mod") {
             return Some(Self::Mod);
         }
+        if name.eq_ignore_ascii_case("array") {
+            return Some(Self::Array);
+        }
+        if name.eq_ignore_ascii_case("full") {
+            return Some(Self::Full);
+        }
+        if name.eq_ignore_ascii_case("unpack") {
+            return Some(Self::Unpack);
+        }
+        if name.eq_ignore_ascii_case("getidx") {
+            return Some(Self::GetIdx);
+        }
+        if name.eq_ignore_ascii_case("putidx") {
+            return Some(Self::PutIdx);
+        }
+        if name.eq_ignore_ascii_case("readidx") {
+            return Some(Self::ReadIdx);
+        }
+        if name.eq_ignore_ascii_case("fillidx") {
+            return Some(Self::FillIdx);
+        }
+        if name.eq_ignore_ascii_case("fullidx") {
+            return Some(Self::FullIdx);
+        }
         None
     }
 }
@@ -208,6 +240,35 @@ fn extract_numeric_unary(sexp: Rc<Value>, image: &mut Image) -> Result<Number, &
     match &extract_unary(sexp, image)? {
         Value::Number(n) => Ok(*n),
         _ => Err("Argument is not a number."),
+    }
+}
+
+/// Extract a usize from an already-evaluated Value.
+fn extract_usize(val: &Value, ctx: &'static str) -> Result<usize, &'static str> {
+    if let Value::Number(n) = val {
+        Ok(n.as_i32().map_err(|_| ctx)? as usize)
+    } else {
+        Err(ctx)
+    }
+}
+
+/// Extract a u32 from an already-evaluated Value.
+fn extract_u32(val: &Value, ctx: &'static str) -> Result<u32, &'static str> {
+    if let Value::Number(n) = val {
+        n.as_u32().map_err(|_| ctx)
+    } else {
+        Err(ctx)
+    }
+}
+
+/// Extract a raw *mut u32 base pointer from a Number (must be Addr).
+/// The returned pointer is to the base; callers offset by index * sizeof(u32).
+fn extract_addr(n: &Number, ctx: &'static str) -> Result<*mut u32, &'static str> {
+    let a = n.as_addr().map_err(|_| ctx)?;
+    if let Number::Addr(a) = a {
+        Ok(a as *mut u32)
+    } else {
+        Err(ctx)
     }
 }
 
@@ -767,6 +828,212 @@ pub fn execute_special(
 
             // return the expanded sexp as a value, don't execute it
             Ok((expanded, image.e.clone()))
+        }
+
+        // --- arrays ---
+
+        // `(array list)` — convert a lisp list of numbers to a Value::Array
+        Special::Array => {
+            let val = extract_unary(sexp, image)?;
+            let mut v = Vec::new();
+            let mut cur = val;
+            loop {
+                match &cur {
+                    Value::Nil => break,
+                    Value::Cons(head, tail) => {
+                        if let Value::Number(n) = head.as_ref() {
+                            let u = n.as_u32().map_err(|_| "array: elements must be u32.")?;
+                            v.push(u);
+                            cur = tail.as_ref().clone();
+                        } else {
+                            return Err("array: elements must be numbers.");
+                        }
+                    }
+                    _ => return Err("array: argument must be a list."),
+                }
+            }
+            Ok((Value::array(v), env))
+        }
+
+        // `(full n value)` — create a new array of n copies of value
+        Special::Full => {
+            let (l, r) = extract_numeric_binop(sexp.clone(), image)?;
+            let n = l.as_i32().map_err(|_| "full: first arg must be an integer.")? as usize;
+            let val = r.as_u32().map_err(|_| "full: second arg must be a u32.")?;
+            Ok((Value::array_fill(n, val), env))
+        }
+
+        // `(unpack array)` — convert a Value::Array back to a lisp list
+        Special::Unpack => {
+            let val = extract_unary(sexp, image)?;
+            if let Value::Array(a) = &val {
+                let borrowed = a.borrow();
+                let mut result = Value::Nil;
+                for u in borrowed.iter().rev() {
+                    result = Value::cons(
+                        Value::Number(Number::Unsigned(*u)),
+                        result,
+                    );
+                }
+                Ok((result, env))
+            } else {
+                Err("unpack: argument must be an array.")
+            }
+        }
+
+        // `(getidx target n)` — get u32 at index n.
+        // target: Array (bounds-checked) or Addr (raw, reads at addr+n*4).
+        Special::GetIdx => {
+            let target = evaluate(sexp.nth(1), image)?.0;
+            let idx_val = evaluate(sexp.nth(2), image)?.0;
+            let i = extract_usize(&idx_val, "getidx: index")?;
+            let val = match &target {
+                Value::Array(a) => {
+                    let b = a.borrow();
+                    if i >= b.len() { return Err("getidx: index out of bounds."); }
+                    b[i]
+                }
+                Value::Number(n) => {
+                    let base = extract_addr(n, "getidx: first arg")?;
+                    unsafe { *(base.wrapping_add(i) as *const u32) }
+                }
+                _ => return Err("getidx: first arg must be an array or address."),
+            };
+            Ok((Value::Number(Number::Unsigned(val)), env))
+        }
+
+        // `(putidx target n val)` — set u32 at index n.
+        // target: Array (bounds-checked, mutates in place) or Addr (raw write at addr+n*4).
+        Special::PutIdx => {
+            let target = evaluate(sexp.nth(1), image)?.0;
+            let idx_val = evaluate(sexp.nth(2), image)?.0;
+            let val_val = evaluate(sexp.nth(3), image)?.0;
+            let i = extract_usize(&idx_val, "putidx: index")?;
+            let val = extract_u32(&val_val, "putidx: value")?;
+            match &target {
+                Value::Array(a) => {
+                    let mut b = a.borrow_mut();
+                    if i >= b.len() { return Err("putidx: index out of bounds."); }
+                    b[i] = val;
+                }
+                Value::Number(n) => {
+                    let base = extract_addr(n, "putidx: first arg")?;
+                    unsafe { *(base.wrapping_add(i) as *mut u32) = val; }
+                }
+                _ => return Err("putidx: first arg must be an array or address."),
+            }
+            Ok((Value::Nil, env))
+        }
+
+        // `(readidx target offset n)` — read n u32s starting at offset into a list.
+        // target: Array (bounds-checked) or Addr (raw, reads at addr+(offset+i)*4).
+        Special::ReadIdx => {
+            let target = evaluate(sexp.nth(1), image)?.0;
+            let off_val = evaluate(sexp.nth(2), image)?.0;
+            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let offset = extract_usize(&off_val, "readidx: offset")?;
+            let count = extract_usize(&n_val, "readidx: count")?;
+            let mut result = Value::Nil;
+            match &target {
+                Value::Array(a) => {
+                    let b = a.borrow();
+                    if offset + count > b.len() { return Err("readidx: range out of bounds."); }
+                    for i in (0..count).rev() {
+                        result = Value::cons(
+                            Value::Number(Number::Unsigned(b[offset + i])),
+                            result,
+                        );
+                    }
+                }
+                Value::Number(n) => {
+                    let base = extract_addr(n, "readidx: first arg")?;
+                    for i in (0..count).rev() {
+                        let val = unsafe { *(base.wrapping_add(offset + i) as *const u32) };
+                        result = Value::cons(
+                            Value::Number(Number::Unsigned(val)),
+                            result,
+                        );
+                    }
+                }
+                _ => return Err("readidx: first arg must be an array or address."),
+            }
+            Ok((result, env))
+        }
+
+        // `(fillidx target offset list)` — write list values starting at offset.
+        // target: Array (bounds-checked) or Addr (raw write at addr+(offset+i)*4).
+        Special::FillIdx => {
+            let target = evaluate(sexp.nth(1), image)?.0;
+            let off_val = evaluate(sexp.nth(2), image)?.0;
+            let list_val = evaluate(sexp.nth(3), image)?.0;
+            let offset = extract_usize(&off_val, "fillidx: offset")?;
+            match &target {
+                Value::Array(a) => {
+                    let mut b = a.borrow_mut();
+                    let mut cur = list_val;
+                    let mut i = 0;
+                    loop {
+                        match &cur {
+                            Value::Nil => break,
+                            Value::Cons(head, tail) => {
+                                let val = extract_u32(head, "fillidx: list element")?;
+                                if offset + i >= b.len() { return Err("fillidx: write out of bounds."); }
+                                b[offset + i] = val;
+                                i += 1;
+                                cur = tail.as_ref().clone();
+                            }
+                            _ => return Err("fillidx: third arg must be a list."),
+                        }
+                    }
+                }
+                Value::Number(n) => {
+                    let base = extract_addr(n, "fillidx: first arg")?;
+                    let mut cur = list_val;
+                    let mut i = 0;
+                    loop {
+                        match &cur {
+                            Value::Nil => break,
+                            Value::Cons(head, tail) => {
+                                let val = extract_u32(head, "fillidx: list element")?;
+                                unsafe { *(base.wrapping_add(offset + i) as *mut u32) = val; }
+                                i += 1;
+                                cur = tail.as_ref().clone();
+                            }
+                            _ => return Err("fillidx: third arg must be a list."),
+                        }
+                    }
+                }
+                _ => return Err("fillidx: first arg must be an array or address."),
+            }
+            Ok((Value::Nil, env))
+        }
+
+        // `(fullidx target offset n val)` — fill n slots starting at offset with val.
+        // target: Array (bounds-checked) or Addr (raw write at addr+(offset+i)*4).
+        Special::FullIdx => {
+            let target = evaluate(sexp.nth(1), image)?.0;
+            let off_val = evaluate(sexp.nth(2), image)?.0;
+            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let val_val = evaluate(sexp.nth(4), image)?.0;
+            let offset = extract_usize(&off_val, "fullidx: offset")?;
+            let count = extract_usize(&n_val, "fullidx: count")?;
+            let val = extract_u32(&val_val, "fullidx: value")?;
+            match &target {
+                Value::Array(a) => {
+                    let mut b = a.borrow_mut();
+                    if offset + count > b.len() { return Err("fullidx: range out of bounds."); }
+                    b[offset..offset + count].fill(val);
+                }
+                Value::Number(n) => {
+                    let base = extract_addr(n, "fullidx: first arg")?;
+                    let dst = unsafe {
+                        core::slice::from_raw_parts_mut(base.wrapping_add(offset), count)
+                    };
+                    dst.fill(val);
+                }
+                _ => return Err("fullidx: first arg must be an array or address."),
+            }
+            Ok((Value::Nil, env))
         }
     }
 }

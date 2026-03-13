@@ -54,7 +54,8 @@ pub fn evaluate(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environmen
         | Value::Closure(_)
         | Value::Macro(_)
         | Value::Special(_)
-        | Value::Syscall(_) => Ok(((*sexp).clone(), env)),
+        | Value::Syscall(_)
+        | Value::Array(_) => Ok(((*sexp).clone(), env)),
 
         // symbol — look up in environment
         Value::Symbol(s) => match image.get(s) {
