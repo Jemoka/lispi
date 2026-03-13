@@ -12,7 +12,7 @@
 //!   0xFF                 — integer (hex)
 //!   0b1010               — integer (binary)
 //!   "hello"              — string (supports \n \t \\ \")
-//!   + - * / > < ~ | &   — operator specials
+//!   + - * / % > < ~ | & << >>  — operator specials
 //!   nil true false       — literal values
 //!   defun lambda if ...  — named special forms
 //!   anything-else        — symbol
@@ -353,8 +353,14 @@ fn parse_operator(input: &str) -> IResult<&str, Value> {
     if input.starts_with("<=") {
         return Ok((&input[2..], Value::Special(Special::Lte)));
     }
+    if input.starts_with("<<") {
+        return Ok((&input[2..], Value::Special(Special::Lshift)));
+    }
+    if input.starts_with(">>") {
+        return Ok((&input[2..], Value::Special(Special::Rshift)));
+    }
     let (rest, ch) =
-        satisfy(|c| matches!(c, '+' | '*' | '/' | '>' | '<' | '~' | '|' | '&'))(input)?;
+        satisfy(|c| matches!(c, '+' | '*' | '/' | '%' | '>' | '<' | '~' | '|' | '&'))(input)?;
     // reject if followed by an identifier-start char (e.g. `/foo` shouldn't be Div)
     if rest.starts_with(|c: char| is_ident_start(c)) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -366,6 +372,7 @@ fn parse_operator(input: &str) -> IResult<&str, Value> {
         '+' => Special::Add,
         '*' => Special::Mul,
         '/' => Special::Div,
+        '%' => Special::Mod,
         '>' => Special::Gt,
         '<' => Special::Lt,
         '~' => Special::BinNot,

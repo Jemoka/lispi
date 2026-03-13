@@ -1,0 +1,78 @@
+;;;; helpers ;;;
+(defun nth (n l)
+  (if (eq n 0)
+      (car l)
+    (nth (- n 1) (cdr l))))
+(defun map (f l)
+  (if (nullp l)
+      nil
+    (cons (f (car l)) (map f (cdr l)))))
+(defun reduce (f acc l)
+  (if (nullp l)
+      acc
+    (reduce f (f acc (car l)) (cdr l))))
+(defun filter (f l)
+  (if (nullp l)
+      nil
+    (if (f (car l))
+        (cons (car l) (filter f (cdr l)))
+      (filter f (cdr l)))))
+
+;;;; gpio ;;;
+(set gpio/BASE #0x20200000)
+(set gpio/fsel-offsets '(0x00 0x04 0x08 0x0c 0x10 0x14))
+(set gpio/FSEL (map (lambda (x) (+ gpio/BASE x)) gpio/fsel-offsets))
+;; input, output, alt0, alt1, alt2, alt3, alt4, alt5
+(set gpio/INPUT 0b000)
+(set gpio/OUTPUT 0b001)
+(set gpio/ALT0 0b100)
+(set gpio/ALT1 0b101)
+(set gpio/ALT2 0b110)
+(set gpio/ALT3 0b111)
+(set gpio/ALT4 0b011)
+(set gpio/ALT5 0b010)
+;; set0 and clr0 and lev0
+(set gpio/SET0 (+ gpio/BASE 0x1c))
+(set gpio/CLR0 (+ gpio/BASE 0x28))
+(set gpio/LEV0 (+ gpio/BASE 0x34))
+
+(defun gpio/set-function (pin func) 
+  (let (group (/ pin 10)
+              offset (* (mod pin 10) 3))
+    (let (sel (@get32 (nth group gpio/FSEL)))
+      (begin
+       (set sel (& (~ (<< 0b111 offset)) sel))
+       (set sel (binor (<< func offset) sel))
+       (@put32 (nth group gpio/FSEL) sel)))))
+(defun gpio/get-function (pin)
+  (let (group (/ pin 10)
+              offset (* (mod pin 10) 3))
+    (binand
+     (@get32 (nth group gpio/FSEL))
+     (<< 0b111 offset))))
+(defun gpio/set-output (pin)
+    (gpio/set-function pin gpio/OUTPUT))
+(defun gpio/set-input (pin)
+  (gpio/set-function pin gpio/INPUT))
+
+;; set 0 and set 1 are continuous
+(defun gpio/set-on (pin)
+  (let (group (/ pin 32)
+              offset (mod pin 32))
+    (@put32 (+ gpio/SET0 (* group 4)) (<< 1 offset))))
+(defun gpio/set-off (pin)
+  (let (group (/ pin 32)
+              offset (mod pin 32))
+    (@put32 (+ gpio/CLR0 (* group 4)) (<< 1 offset))))
+(defun gpio/write (pin value)
+  (if value
+      (gpio/set-on pin)
+    (gpio/set-off pin)))
+(defun gpio/read (pin)
+  (let (group (/ pin 32)
+              offset (% pin 32))
+    (not (eq 0 (binand
+                (@get32 (+ gpio/LEV0 (* group 4)))
+                (<< 1 offset))))))
+
+

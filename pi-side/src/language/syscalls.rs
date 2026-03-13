@@ -18,6 +18,7 @@ pub enum Syscall {
     UartInit,
     UartPut8,
     UartGet8,
+    Delay,
 }
 
 impl Syscall {
@@ -44,6 +45,9 @@ impl Syscall {
         }
         if name.eq_ignore_ascii_case("uart/get8") {
             return Some(Self::UartGet8);
+        }
+        if name.eq_ignore_ascii_case("delay") {
+            return Some(Self::Delay);
         }
         None
     }
@@ -128,6 +132,25 @@ pub fn execute_syscall(
         Syscall::UartGet8 => {
             let byte = uart::get8();
             Ok((Value::Number(super::number::Number::Integer(byte as i32)), env))
+        }
+        Syscall::Delay => {
+            let val = evaluate(sexp.nth(1), image)?.0;
+            if let Value::Number(n) = &val {
+                let count = n
+                    .as_i32()
+                    .map_err(|_| "delay: argument must be an integer.")?;
+                if count < 0 {
+                    return Err("delay: argument must be non-negative.");
+                }
+                for _ in 0..count {
+                    unsafe {
+                        core::arch::asm!("add r1, r1, #0", out("r1") _);
+                    }
+                }
+                Ok((Value::Nil, env))
+            } else {
+                Err("delay requires a number argument.")
+            }
         }
     }
 }

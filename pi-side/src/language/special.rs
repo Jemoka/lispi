@@ -36,9 +36,15 @@ pub enum Special {
     Mul,
     Div,
     Addr,
+    Signed,
+    Unsigned,
     Let,
     List,
     Macroexpand,
+    Lshift,
+    Rshift,
+    Mod,
+    Cons,
 }
 
 impl Special {
@@ -123,6 +129,12 @@ impl Special {
         if name.eq_ignore_ascii_case("addr") {
             return Some(Self::Addr);
         }
+        if name.eq_ignore_ascii_case("signed") {
+            return Some(Self::Signed);
+        }
+        if name.eq_ignore_ascii_case("unsigned") {
+            return Some(Self::Unsigned);
+        }
         if name.eq_ignore_ascii_case("let") {
             return Some(Self::Let);
         }
@@ -131,6 +143,18 @@ impl Special {
         }
         if name.eq_ignore_ascii_case("macroexpand") {
             return Some(Self::Macroexpand);
+        }
+        if name.eq_ignore_ascii_case("cons") {
+            return Some(Self::Cons);
+        }
+        if name.eq_ignore_ascii_case("lshift") {
+            return Some(Self::Lshift);
+        }
+        if name.eq_ignore_ascii_case("rshift") {
+            return Some(Self::Rshift);
+        }
+        if name.eq_ignore_ascii_case("mod") {
+            return Some(Self::Mod);
         }
         None
     }
@@ -144,10 +168,10 @@ fn extract_numeric_binop(
     let left = sexp.nth(1);
     let right = sexp.nth(2);
 
-    if right.is_nil() {
+    if !sexp.nth_exists(2) {
         return Err("Expected 2 arguments, got fewer.");
     }
-    if !sexp.nth(3).is_nil() {
+    if sexp.nth_exists(3) {
         return Err("Expected 2 arguments, got more.");
     }
 
@@ -169,10 +193,10 @@ fn extract_numeric_binop(
 /// Extract and evaluate a single argument of any type from sexp (special arg).
 fn extract_unary(sexp: Rc<Value>, image: &mut Image) -> Result<Value, &'static str> {
     let arg = sexp.nth(1);
-    if arg.is_nil() {
+    if !sexp.nth_exists(1) {
         return Err("Expected 1 argument, got none.");
     }
-    if !sexp.nth(2).is_nil() {
+    if sexp.nth_exists(2) {
         return Err("Expected 1 argument, got more.");
     }
     Ok(evaluate(arg, image)?.0)
@@ -265,11 +289,31 @@ pub fn execute_special(
             let (l, r) = extract_numeric_binop(sexp, image)?;
             Ok((Value::Number(l.div(r)?), env))
         }
+        Special::Mod => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            Ok((Value::Number(l.modulo(r)?), env))
+        }
+        Special::Lshift => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            Ok((Value::Number(l.lshift(r)?), env))
+        }
+        Special::Rshift => {
+            let (l, r) = extract_numeric_binop(sexp, image)?;
+            Ok((Value::Number(l.rshift(r)?), env))
+        }
 
         // --- type coercion ---
         Special::Addr => {
             let n = extract_numeric_unary(sexp, image)?;
             Ok((Value::Number(n.as_addr()?), env))
+        }
+        Special::Signed => {
+            let n = extract_numeric_unary(sexp, image)?;
+            Ok((Value::Number(Number::Integer(n.as_i32()?)), env))
+        }
+        Special::Unsigned => {
+            let n = extract_numeric_unary(sexp, image)?;
+            Ok((Value::Number(Number::Unsigned(n.as_u32()?)), env))
         }
 
         // --- logic ---
@@ -342,6 +386,21 @@ pub fn execute_special(
 
         // --- list ops ---
 
+        // `cons`: construct a cons cell from two evaluated arguments.
+        Special::Cons => {
+            let left = sexp.nth(1);
+            let right = sexp.nth(2);
+            if !sexp.nth_exists(2) {
+                return Err("cons: expected 2 arguments.");
+            }
+            if sexp.nth_exists(3) {
+                return Err("cons: too many arguments.");
+            }
+            let l = evaluate(left, image)?.0;
+            let r = evaluate(right, image)?.0;
+            Ok((Value::cons(l, r), env))
+        }
+
         // `car`: head of a cons cell. nil if not a cons.
         Special::Car => {
             let val = extract_unary(sexp, image)?;
@@ -388,10 +447,10 @@ pub fn execute_special(
         Special::Lambda => {
             let param_list = sexp.nth(1);
             let body = sexp.nth(2);
-            if body.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("lambda: missing body.");
             }
-            if !sexp.nth(3).is_nil() {
+            if sexp.nth_exists(3) {
                 return Err("lambda: too many arguments (expected params and body).");
             }
 
@@ -415,10 +474,10 @@ pub fn execute_special(
         Special::Set => {
             let name_val = sexp.nth(1);
             let val_expr = sexp.nth(2);
-            if name_val.is_nil() || val_expr.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("set: expected name and value.");
             }
-            if !sexp.nth(3).is_nil() {
+            if sexp.nth_exists(3) {
                 return Err("set: too many arguments.");
             }
 
@@ -427,14 +486,16 @@ pub fn execute_special(
                 _ => return Err("set: first argument must be a symbol."),
             };
 
+            // pre-create binding so that the value expression (e.g. a lambda)
+            // captures the slot — enabling self-recursion via shared RefCell
+            if image.binding(&name).is_none() {
+                image.insert(name.clone(), val_expr.clone());
+            }
+
             let val = evaluate(val_expr, image)?.0;
 
-            // if binding exists, mutate in place; otherwise create fresh
-            if let Some(binding) = image.binding(&name) {
-                *binding.borrow_mut() = Rc::new(val.clone());
-            } else {
-                image.insert(name, Rc::new(val.clone()));
-            }
+            // mutate in-place — visible to any closure that captured this binding
+            *image.binding(&name).unwrap().borrow_mut() = Rc::new(val.clone());
 
             let env = image.e.clone();
             Ok((val, env))
@@ -446,10 +507,10 @@ pub fn execute_special(
             let name = sexp.nth(1);
             let params = sexp.nth(2);
             let body = sexp.nth(3);
-            if name.is_nil() || body.is_nil() {
+            if !sexp.nth_exists(3) {
                 return Err("defun: expected name, params, and body.");
             }
-            if !sexp.nth(4).is_nil() {
+            if sexp.nth_exists(4) {
                 return Err("defun: too many arguments.");
             }
 
@@ -473,7 +534,7 @@ pub fn execute_special(
         Special::And => {
             let left = sexp.nth(1);
             let right = sexp.nth(2);
-            if left.is_nil() || right.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("and: expected 2 arguments.");
             }
             let l = evaluate(left, image)?.0;
@@ -490,7 +551,7 @@ pub fn execute_special(
         Special::Or => {
             let left = sexp.nth(1);
             let right = sexp.nth(2);
-            if left.is_nil() || right.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("or: expected 2 arguments.");
             }
             let l = evaluate(left, image)?.0;
@@ -506,7 +567,7 @@ pub fn execute_special(
         Special::Xor => {
             let left = sexp.nth(1);
             let right = sexp.nth(2);
-            if left.is_nil() || right.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("xor: expected 2 arguments.");
             }
             let l = evaluate(left, image)?.0;
@@ -523,7 +584,7 @@ pub fn execute_special(
             let cond = sexp.nth(1);
             let then_branch = sexp.nth(2);
             let else_branch = sexp.nth(3);
-            if cond.is_nil() || then_branch.is_nil() || else_branch.is_nil() {
+            if !sexp.nth_exists(3) {
                 return Err("if: expected condition, then, and else.");
             }
             let c = evaluate(cond, image)?.0;
@@ -559,10 +620,10 @@ pub fn execute_special(
         Special::Let => {
             let bindings_list = sexp.nth(1);
             let body = sexp.nth(2);
-            if body.is_nil() {
+            if !sexp.nth_exists(2) {
                 return Err("let: expected bindings and body.");
             }
-            if !sexp.nth(3).is_nil() {
+            if sexp.nth_exists(3) {
                 return Err("let: too many arguments.");
             }
 
@@ -618,10 +679,10 @@ pub fn execute_special(
             let name_val = sexp.nth(1);
             let param_list = sexp.nth(2);
             let body = sexp.nth(3);
-            if name_val.is_nil() || body.is_nil() {
+            if !sexp.nth_exists(3) {
                 return Err("defmacro: expected name, params, and body.");
             }
-            if !sexp.nth(4).is_nil() {
+            if sexp.nth_exists(4) {
                 return Err("defmacro: too many arguments.");
             }
 
@@ -656,10 +717,10 @@ pub fn execute_special(
         // Useful for debugging macros.
         Special::Macroexpand => {
             let arg = sexp.nth(1);
-            if arg.is_nil() {
+            if !sexp.nth_exists(1) {
                 return Err("macroexpand: expected 1 argument.");
             }
-            if !sexp.nth(2).is_nil() {
+            if sexp.nth_exists(2) {
                 return Err("macroexpand: too many arguments.");
             }
 

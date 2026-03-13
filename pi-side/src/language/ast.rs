@@ -89,6 +89,19 @@ impl Value {
             _ => Value::Nil.into(),
         }
     }
+
+    /// Returns true if position `n` structurally exists in this cons list,
+    /// even if the value at that position is Nil.
+    pub fn nth_exists(&self, n: usize) -> bool {
+        let mut current = self;
+        for _ in 0..n {
+            match current {
+                Value::Cons(_, cdr) => current = cdr,
+                _ => return false,
+            }
+        }
+        matches!(current, Value::Cons(_, _))
+    }
 }
 
 /// Display a Value in a human-readable form, used by the `print` special form.

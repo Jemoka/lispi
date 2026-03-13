@@ -158,6 +158,63 @@ impl Number {
             }
         }
     }
+
+    /// Modulo two numbers. Addresses cannot be used. Division by zero errors.
+    pub fn modulo(self, other: Number) -> Result<Number, &'static str> {
+        match (self, other) {
+            (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot modulo addresses."),
+            (Number::Integer(a), Number::Integer(b)) => {
+                if b == 0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Integer(a % b))
+                }
+            }
+            (Number::Unsigned(a), Number::Unsigned(b)) => {
+                if b == 0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Unsigned(a % b))
+                }
+            }
+            (Number::Unsigned(a), Number::Integer(b)) => {
+                if b == 0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Unsigned(a % b as u32))
+                }
+            }
+            (Number::Integer(a), Number::Unsigned(b)) => {
+                if b == 0 {
+                    Err("Division by zero.")
+                } else {
+                    Ok(Number::Unsigned(a as u32 % b))
+                }
+            }
+        }
+    }
+
+    /// Left-shift. Addresses cannot be shifted.
+    pub fn lshift(self, other: Number) -> Result<Number, &'static str> {
+        match (self, other) {
+            (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot shift addresses."),
+            (Number::Integer(a), Number::Integer(b)) => Ok(Number::Integer(a.wrapping_shl(b as u32))),
+            (Number::Unsigned(a), Number::Unsigned(b)) => Ok(Number::Unsigned(a.wrapping_shl(b))),
+            (Number::Unsigned(a), Number::Integer(b)) => Ok(Number::Unsigned(a.wrapping_shl(b as u32))),
+            (Number::Integer(a), Number::Unsigned(b)) => Ok(Number::Integer(a.wrapping_shl(b))),
+        }
+    }
+
+    /// Right-shift. Arithmetic for Integer, logical for Unsigned. Addresses cannot be shifted.
+    pub fn rshift(self, other: Number) -> Result<Number, &'static str> {
+        match (self, other) {
+            (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot shift addresses."),
+            (Number::Integer(a), Number::Integer(b)) => Ok(Number::Integer(a.wrapping_shr(b as u32))),
+            (Number::Unsigned(a), Number::Unsigned(b)) => Ok(Number::Unsigned(a.wrapping_shr(b))),
+            (Number::Unsigned(a), Number::Integer(b)) => Ok(Number::Unsigned(a.wrapping_shr(b as u32))),
+            (Number::Integer(a), Number::Unsigned(b)) => Ok(Number::Integer(a.wrapping_shr(b))),
+        }
+    }
 }
 
 impl fmt::Display for Number {
