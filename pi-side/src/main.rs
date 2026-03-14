@@ -40,7 +40,7 @@ fn main() {
         match language::parse(&payload_str) {
             Ok(expr) => {
                 match language::evaluate(expr.into(), &mut img) {
-                    Ok((result, _)) => {
+                    Ok(result) => {
                         let response = format!("{}", result);
                         framer.send(response.as_bytes());
                     }

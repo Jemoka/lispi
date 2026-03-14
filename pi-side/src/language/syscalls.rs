@@ -5,7 +5,7 @@ use alloc::rc::Rc;
 use core::alloc::Layout;
 
 use super::ast::Value;
-use super::environment::{Environment, Image};
+use super::environment::Image;
 use super::execute::evaluate;
 
 use crate::comm::uart;
@@ -91,11 +91,10 @@ pub fn execute_syscall(
     syscall: Syscall,
     sexp: Rc<Value>,
     image: &mut Image,
-) -> Result<(Value, Environment), &'static str> {
-    let env = image.e.clone();
+) -> Result<Value, &'static str> {
     match syscall {
         Syscall::Get32 => {
-            let addr = evaluate(sexp.nth(1), image)?.0;
+            let addr = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &addr {
                 let raw_addr = n
                     .as_addr()
@@ -105,10 +104,7 @@ pub fn execute_syscall(
                         return Err("GET32: address must be 4-byte aligned.");
                     }
                     let val = unsafe { get32(a) };
-                    Ok((
-                        Value::Number(super::number::Number::Unsigned(val)),
-                        env,
-                    ))
+                    Ok(Value::Number(super::number::Number::Unsigned(val)))
                 } else {
                     unreachable!()
                 }
@@ -117,8 +113,8 @@ pub fn execute_syscall(
             }
         }
         Syscall::Put32 => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let val_val = evaluate(sexp.nth(2), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let val_val = evaluate(sexp.nth(2), image)?;
             if let (Value::Number(n_addr), Value::Number(n_val)) = (&addr_val, &val_val) {
                 let raw_addr = n_addr.as_addr().map_err(
                     |_| "PUT32: first argument must be an address or non-negative integer.",
@@ -133,7 +129,7 @@ pub fn execute_syscall(
                     unsafe { put32(a, raw_val) };
                     prefetch_flush();
                     dsb();
-                    Ok((Value::Nil, env))
+                    Ok(Value::Nil)
                 } else {
                     unreachable!()
                 }
@@ -143,32 +139,32 @@ pub fn execute_syscall(
         }
         Syscall::DSB => {
             dsb();
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
         Syscall::PrefetchFlush => {
             prefetch_flush();
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
         Syscall::UartInit => {
             uart::init();
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
         Syscall::UartPut8 => {
-            let val = evaluate(sexp.nth(1), image)?.0;
+            let val = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &val {
                 let byte = n.as_i32().map_err(|_| "uart/put8: argument must be an integer.")?;
                 uart::put8(byte as u8);
-                Ok((Value::Nil, env))
+                Ok(Value::Nil)
             } else {
                 Err("uart/put8 requires a number argument.")
             }
         }
         Syscall::UartGet8 => {
             let byte = uart::get8();
-            Ok((Value::Number(super::number::Number::Integer(byte as i32)), env))
+            Ok(Value::Number(super::number::Number::Integer(byte as i32)))
         }
         Syscall::Delay => {
-            let val = evaluate(sexp.nth(1), image)?.0;
+            let val = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &val {
                 let count = n
                     .as_i32()
@@ -181,13 +177,13 @@ pub fn execute_syscall(
                         core::arch::asm!("add r1, r1, #0", out("r1") _);
                     }
                 }
-                Ok((Value::Nil, env))
+                Ok(Value::Nil)
             } else {
                 Err("delay requires a number argument.")
             }
         }
         Syscall::Alloc32 => {
-            let val = evaluate(sexp.nth(1), image)?.0;
+            let val = evaluate(sexp.nth(1), image)?;
             let count = if let Value::Number(n) = &val {
                 let c = n
                     .as_i32()
@@ -200,7 +196,7 @@ pub fn execute_syscall(
                 return Err("alloc32 requires a number argument.");
             };
             let align = if sexp.nth_exists(2) {
-                let a_val = evaluate(sexp.nth(2), image)?.0;
+                let a_val = evaluate(sexp.nth(2), image)?;
                 if let Value::Number(n) = &a_val {
                     let a = n
                         .as_i32()
@@ -217,7 +213,7 @@ pub fn execute_syscall(
             };
             let size = count * 4;
             if size == 0 {
-                return Ok((Value::Number(super::number::Number::Addr(align)), env));
+                return Ok(Value::Number(super::number::Number::Addr(align)));
             }
             let layout =
                 Layout::from_size_align(size, align).map_err(|_| "alloc32: invalid layout.")?;
@@ -225,17 +221,14 @@ pub fn execute_syscall(
             if ptr.is_null() {
                 return Err("alloc32: allocation failed.");
             }
-            Ok((
-                Value::Number(super::number::Number::Addr(ptr as usize)),
-                env,
-            ))
+            Ok(Value::Number(super::number::Number::Addr(ptr as usize)))
         }
         // (@read32 addr offset n) — read n u32 slots starting at addr + offset*4,
         // return as a lisp list.
         Syscall::Read32 => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "read32: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -261,14 +254,14 @@ pub fn execute_syscall(
                     result,
                 );
             }
-            Ok((result, env))
+            Ok(result)
         }
 
         // (@zero32 addr offset n) — zero n u32 slots starting at addr + offset*4.
         Syscall::Zero32 => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "zero32: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -289,15 +282,15 @@ pub fn execute_syscall(
                 let addr = base + (offset + i) * 4;
                 unsafe { put32(addr, 0) };
             }
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         // (@fill32 addr offset list) — write each u32 in list to consecutive
         // slots starting at addr + offset*4.
         Syscall::Fill32 => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let list_val = evaluate(sexp.nth(3), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let list_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "fill32: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -328,12 +321,12 @@ pub fn execute_syscall(
                     _ => return Err("fill32: third arg must be a list."),
                 }
             }
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         Syscall::Free32 => {
-            let ptr_val = evaluate(sexp.nth(1), image)?.0;
-            let len_val = evaluate(sexp.nth(2), image)?.0;
+            let ptr_val = evaluate(sexp.nth(1), image)?;
+            let len_val = evaluate(sexp.nth(2), image)?;
             let raw_addr = if let Value::Number(n) = &ptr_val {
                 let a = n
                     .as_addr()
@@ -358,7 +351,7 @@ pub fn execute_syscall(
                 return Err("free32 requires a number as second argument.");
             };
             let align = if sexp.nth_exists(3) {
-                let a_val = evaluate(sexp.nth(3), image)?.0;
+                let a_val = evaluate(sexp.nth(3), image)?;
                 if let Value::Number(n) = &a_val {
                     let a = n
                         .as_i32()
@@ -375,21 +368,21 @@ pub fn execute_syscall(
             };
             let size = count * 4;
             if size == 0 {
-                return Ok((Value::Nil, env));
+                return Ok(Value::Nil);
             }
             let layout =
                 Layout::from_size_align(size, align).map_err(|_| "free32: invalid layout.")?;
             unsafe { alloc::alloc::dealloc(raw_addr as *mut u8, layout) };
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         // (@full32 addr offset n value) — fill n consecutive u32 slots
         // starting at addr + offset*4 with value. Pure Rust loop, no list needed.
         Syscall::Full32 => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
-            let val_val = evaluate(sexp.nth(4), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
+            let val_val = evaluate(sexp.nth(4), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "full32: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -414,14 +407,14 @@ pub fn execute_syscall(
             let dst = (base + offset * 4) as *mut u32;
             let slice = unsafe { core::slice::from_raw_parts_mut(dst, count) };
             slice.fill(val);
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         // (@ldr addr offset n) — load n u32 slots from memory into a new array.
         Syscall::Ldr => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "ldr: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -441,15 +434,15 @@ pub fn execute_syscall(
             let src = (base + offset * 4) as *const u32;
             let mut v = alloc::vec![0u32; count];
             unsafe { core::ptr::copy_nonoverlapping(src, v.as_mut_ptr(), count) };
-            Ok((Value::array(v), env))
+            Ok(Value::array(v))
         }
 
         // (@str addr offset array) — copy array contents to addr + offset*4
         // using copy_nonoverlapping (memcpy).
         Syscall::Str => {
-            let addr_val = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let arr_val = evaluate(sexp.nth(3), image)?.0;
+            let addr_val = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let arr_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
                 let a = n.as_addr().map_err(|_| "str: first arg must be an address.")?;
                 if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
@@ -467,7 +460,7 @@ pub fn execute_syscall(
                 unsafe {
                     core::ptr::copy_nonoverlapping(borrowed.as_ptr(), dst, borrowed.len());
                 }
-                Ok((Value::Nil, env))
+                Ok(Value::Nil)
             } else {
                 Err("str: third arg must be an array.")
             }

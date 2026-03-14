@@ -4,8 +4,8 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::ast::{Closure, Macro, Symbol, Value};
-use super::environment::{Environment, Image};
-use super::execute::evaluate;
+use super::environment::Image;
+use super::execute::{eval, evaluate};
 use super::number::Number;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -207,8 +207,8 @@ fn extract_numeric_binop(
         return Err("Expected 2 arguments, got more.");
     }
 
-    let left_val = evaluate(left, image)?.0;
-    let right_val = evaluate(right, image)?.0;
+    let left_val = evaluate(left, image)?;
+    let right_val = evaluate(right, image)?;
 
     let l = match &left_val {
         Value::Number(n) => *n,
@@ -231,7 +231,7 @@ fn extract_unary(sexp: Rc<Value>, image: &mut Image) -> Result<Value, &'static s
     if sexp.nth_exists(2) {
         return Err("Expected 1 argument, got more.");
     }
-    Ok(evaluate(arg, image)?.0)
+    evaluate(arg, image)
 }
 
 /// Extract and evaluate a single numeric argument from sexp (special arg).
@@ -308,73 +308,73 @@ pub fn execute_special(
     form: Special,
     sexp: Rc<Value>,
     image: &mut Image,
-) -> Result<(Value, Environment), &'static str> {
-    let env = image.e.clone();
+    tail: bool,
+) -> Result<Value, &'static str> {
     match form {
         // --- comparators ---
         Special::Gt => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Bool(l > r), env))
+            Ok(Value::Bool(l > r))
         }
         Special::Lt => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Bool(l < r), env))
+            Ok(Value::Bool(l < r))
         }
         Special::Gte => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Bool(l >= r), env))
+            Ok(Value::Bool(l >= r))
         }
         Special::Lte => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Bool(l <= r), env))
+            Ok(Value::Bool(l <= r))
         }
         Special::Eq => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Bool(l == r), env))
+            Ok(Value::Bool(l == r))
         }
 
         // --- arithmetic ---
         Special::Add => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.add(r)?), env))
+            Ok(Value::Number(l.add(r)?))
         }
         Special::Sub => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.sub(r)?), env))
+            Ok(Value::Number(l.sub(r)?))
         }
         Special::Mul => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.mul(r)?), env))
+            Ok(Value::Number(l.mul(r)?))
         }
         Special::Div => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.div(r)?), env))
+            Ok(Value::Number(l.div(r)?))
         }
         Special::Mod => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.modulo(r)?), env))
+            Ok(Value::Number(l.modulo(r)?))
         }
         Special::Lshift => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.lshift(r)?), env))
+            Ok(Value::Number(l.lshift(r)?))
         }
         Special::Rshift => {
             let (l, r) = extract_numeric_binop(sexp, image)?;
-            Ok((Value::Number(l.rshift(r)?), env))
+            Ok(Value::Number(l.rshift(r)?))
         }
 
         // --- type coercion ---
         Special::Addr => {
             let n = extract_numeric_unary(sexp, image)?;
-            Ok((Value::Number(n.as_addr()?), env))
+            Ok(Value::Number(n.as_addr()?))
         }
         Special::Signed => {
             let n = extract_numeric_unary(sexp, image)?;
-            Ok((Value::Number(Number::Integer(n.as_i32()?)), env))
+            Ok(Value::Number(Number::Integer(n.as_i32()?)))
         }
         Special::Unsigned => {
             let n = extract_numeric_unary(sexp, image)?;
-            Ok((Value::Number(Number::Unsigned(n.as_u32()?)), env))
+            Ok(Value::Number(Number::Unsigned(n.as_u32()?)))
         }
 
         // --- logic ---
@@ -386,11 +386,11 @@ pub fn execute_special(
         Special::Not => {
             let val = extract_unary(sexp, image)?;
             match &val {
-                Value::Bool(b) => Ok((Value::Bool(!b), env)),
-                Value::Number(Number::Integer(0)) => Ok((Value::Number(Number::Integer(1)), env)),
-                Value::Number(Number::Integer(_)) => Ok((Value::Number(Number::Integer(0)), env)),
-                Value::Number(Number::Unsigned(0)) => Ok((Value::Number(Number::Unsigned(1)), env)),
-                Value::Number(Number::Unsigned(_)) => Ok((Value::Number(Number::Unsigned(0)), env)),
+                Value::Bool(b) => Ok(Value::Bool(!b)),
+                Value::Number(Number::Integer(0)) => Ok(Value::Number(Number::Integer(1))),
+                Value::Number(Number::Integer(_)) => Ok(Value::Number(Number::Integer(0))),
+                Value::Number(Number::Unsigned(0)) => Ok(Value::Number(Number::Unsigned(1))),
+                Value::Number(Number::Unsigned(_)) => Ok(Value::Number(Number::Unsigned(0))),
                 _ => Err("not: expected bool or integer."),
             }
         }
@@ -399,8 +399,8 @@ pub fn execute_special(
         Special::BinNot => {
             let n = extract_numeric_unary(sexp, image)?;
             match n {
-                Number::Integer(i) => Ok((Value::Number(Number::Integer(!i)), env)),
-                Number::Unsigned(u) => Ok((Value::Number(Number::Unsigned(!u)), env)),
+                Number::Integer(i) => Ok(Value::Number(Number::Integer(!i))),
+                Number::Unsigned(u) => Ok(Value::Number(Number::Unsigned(!u))),
                 _ => Err("binnot: expected integer or unsigned."),
             }
         }
@@ -410,16 +410,16 @@ pub fn execute_special(
             let (l, r) = extract_numeric_binop(sexp, image)?;
             match (l, r) {
                 (Number::Integer(a), Number::Integer(b)) => {
-                    Ok((Value::Number(Number::Integer(a | b)), env))
+                    Ok(Value::Number(Number::Integer(a | b)))
                 }
                 (Number::Unsigned(a), Number::Unsigned(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a | b)), env))
+                    Ok(Value::Number(Number::Unsigned(a | b)))
                 }
                 (Number::Unsigned(a), Number::Integer(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a | b as u32)), env))
+                    Ok(Value::Number(Number::Unsigned(a | b as u32)))
                 }
                 (Number::Integer(a), Number::Unsigned(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a as u32 | b)), env))
+                    Ok(Value::Number(Number::Unsigned(a as u32 | b)))
                 }
                 _ => Err("binor: expected integers or unsigned."),
             }
@@ -430,16 +430,16 @@ pub fn execute_special(
             let (l, r) = extract_numeric_binop(sexp, image)?;
             match (l, r) {
                 (Number::Integer(a), Number::Integer(b)) => {
-                    Ok((Value::Number(Number::Integer(a & b)), env))
+                    Ok(Value::Number(Number::Integer(a & b)))
                 }
                 (Number::Unsigned(a), Number::Unsigned(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a & b)), env))
+                    Ok(Value::Number(Number::Unsigned(a & b)))
                 }
                 (Number::Unsigned(a), Number::Integer(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a & b as u32)), env))
+                    Ok(Value::Number(Number::Unsigned(a & b as u32)))
                 }
                 (Number::Integer(a), Number::Unsigned(b)) => {
-                    Ok((Value::Number(Number::Unsigned(a as u32 & b)), env))
+                    Ok(Value::Number(Number::Unsigned(a as u32 & b)))
                 }
                 _ => Err("binand: expected integers or unsigned."),
             }
@@ -457,27 +457,27 @@ pub fn execute_special(
             if sexp.nth_exists(3) {
                 return Err("cons: too many arguments.");
             }
-            let l = evaluate(left, image)?.0;
-            let r = evaluate(right, image)?.0;
-            Ok((Value::cons(l, r), env))
+            let l = evaluate(left, image)?;
+            let r = evaluate(right, image)?;
+            Ok(Value::cons(l, r))
         }
 
         // `car`: head of a cons cell. nil if not a cons.
         Special::Car => {
             let val = extract_unary(sexp, image)?;
-            Ok(((*val.car()).clone(), env))
+            Ok((*val.car()).clone())
         }
 
         // `cdr`: tail of a cons cell. nil if not a cons.
         Special::Cdr => {
             let val = extract_unary(sexp, image)?;
-            Ok(((*val.cdr()).clone(), env))
+            Ok((*val.cdr()).clone())
         }
 
         // `nullp`: true iff the argument is exactly nil.
         Special::Nullp => {
             let val = extract_unary(sexp, image)?;
-            Ok((Value::Bool(val.is_nil()), env))
+            Ok(Value::Bool(val.is_nil()))
         }
 
         // `list` makes a list
@@ -489,14 +489,14 @@ pub fn execute_special(
                 if arg.is_nil() {
                     break;
                 }
-                vals.push(evaluate(arg, image)?.0);
+                vals.push(evaluate(arg, image)?);
                 i += 1;
             }
             let mut result = Value::Nil;
             for val in vals.into_iter().rev() {
                 result = Value::cons(val, result);
             }
-            Ok((result, env))
+            Ok(result)
         }
 
         // --- binding / closures ---
@@ -517,14 +517,11 @@ pub fn execute_special(
 
             let params = collect_symbol_list(&param_list)?;
 
-            Ok((
-                Value::Closure(Closure {
-                    params,
-                    body,
-                    env: env.clone(),
-                }),
-                env,
-            ))
+            Ok(Value::Closure(Closure {
+                params,
+                body,
+                env: image.snapshot(),
+            }))
         }
 
         // `set`: bind a name in the current environment.
@@ -553,13 +550,12 @@ pub fn execute_special(
                 image.insert(name.clone(), val_expr.clone());
             }
 
-            let val = evaluate(val_expr, image)?.0;
+            let val = evaluate(val_expr, image)?;
 
             // mutate in-place — visible to any closure that captured this binding
             *image.binding(&name).unwrap().borrow_mut() = Rc::new(val.clone());
 
-            let env = image.e.clone();
-            Ok((val, env))
+            Ok(val)
         }
 
         // `defun`: desugars (defun name (params) body) into
@@ -598,12 +594,11 @@ pub fn execute_special(
             if !sexp.nth_exists(2) {
                 return Err("and: expected 2 arguments.");
             }
-            let l = evaluate(left, image)?.0;
+            let l = evaluate(left, image)?;
             if is_falsy(&l) {
-                Ok((l, image.e.clone()))
+                Ok(l)
             } else {
-                let r = evaluate(right, image)?.0;
-                Ok((r, image.e.clone()))
+                eval(right, image, tail)
             }
         }
 
@@ -615,12 +610,11 @@ pub fn execute_special(
             if !sexp.nth_exists(2) {
                 return Err("or: expected 2 arguments.");
             }
-            let l = evaluate(left, image)?.0;
+            let l = evaluate(left, image)?;
             if !is_falsy(&l) {
-                Ok((l, image.e.clone()))
+                Ok(l)
             } else {
-                let r = evaluate(right, image)?.0;
-                Ok((r, image.e.clone()))
+                eval(right, image, tail)
             }
         }
 
@@ -631,9 +625,9 @@ pub fn execute_special(
             if !sexp.nth_exists(2) {
                 return Err("xor: expected 2 arguments.");
             }
-            let l = evaluate(left, image)?.0;
-            let r = evaluate(right, image)?.0;
-            Ok((Value::Bool(is_falsy(&l) != is_falsy(&r)), image.e.clone()))
+            let l = evaluate(left, image)?;
+            let r = evaluate(right, image)?;
+            Ok(Value::Bool(is_falsy(&l) != is_falsy(&r)))
         }
 
         // --- control flow ---
@@ -648,13 +642,11 @@ pub fn execute_special(
             if !sexp.nth_exists(3) {
                 return Err("if: expected condition, then, and else.");
             }
-            let c = evaluate(cond, image)?.0;
+            let c = evaluate(cond, image)?;
             if !is_falsy(&c) {
-                let v = evaluate(then_branch, image)?.0;
-                Ok((v, image.e.clone()))
+                eval(then_branch, image, tail)
             } else {
-                let v = evaluate(else_branch, image)?.0;
-                Ok((v, image.e.clone()))
+                eval(else_branch, image, tail)
             }
         }
 
@@ -667,10 +659,14 @@ pub fn execute_special(
                 if arg.is_nil() {
                     break;
                 }
-                last_val = evaluate(arg, image)?.0;
+                // check if next element exists — if not, this is the last one
+                if !sexp.nth_exists(i + 1) {
+                    return eval(arg, image, tail);
+                }
+                last_val = evaluate(arg, image)?;
                 i += 1;
             }
-            Ok((last_val, image.e.clone()))
+            Ok(last_val)
         }
         // `let`: introduce local bindings, then evaluate body in that scope.
         //   (let (a 1 b 2 c 3) body)
@@ -688,8 +684,8 @@ pub fn execute_special(
                 return Err("let: too many arguments.");
             }
 
-            // save the current environment so we can restore it after
-            let orig_env = image.e.clone();
+            // push a new frame for let-bindings
+            image.push_frame();
 
             // walk the flat binding list: (name1 val1 name2 val2 ...)
             let mut current: &Value = &bindings_list;
@@ -700,33 +696,47 @@ pub fn execute_special(
                         // name must be a symbol
                         let name = match &**name_rc {
                             Value::Symbol(s) => (**s).clone(),
-                            _ => return Err("let: binding name must be a symbol."),
+                            _ => {
+                                image.pop_frame();
+                                return Err("let: binding name must be a symbol.");
+                            }
                         };
 
                         // next element is the value expression
                         let (val_expr, tail) = match &**rest {
                             Value::Cons(val, tail) => (Rc::clone(val), &**tail),
-                            _ => return Err("let: odd number of elements in binding list."),
+                            _ => {
+                                image.pop_frame();
+                                return Err("let: odd number of elements in binding list.");
+                            }
                         };
 
                         // evaluate value in current (evolving) environment
-                        let val = evaluate(val_expr, image)?.0;
+                        let val = match evaluate(val_expr, image) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                image.pop_frame();
+                                return Err(e);
+                            }
+                        };
                         image.insert(name, Rc::new(val));
 
                         current = tail;
                     }
-                    _ => return Err("let: malformed binding list."),
+                    _ => {
+                        image.pop_frame();
+                        return Err("let: malformed binding list.");
+                    }
                 }
             }
 
-            // evaluate body in the extended environment
-            let result = evaluate(body, image)?.0;
+            // evaluate body in the extended environment (propagate tail)
+            let result = eval(body, image, tail);
 
-            // restore original environment — let bindings don't escape
-            // but side effects (mutations to shared Bindings) do
-            image.e = orig_env;
+            // pop let-bindings frame
+            image.pop_frame();
 
-            Ok((result, image.e.clone()))
+            result
         }
 
         // --- macros ---
@@ -757,7 +767,7 @@ pub fn execute_special(
             let closure = Closure {
                 params: params.clone(),
                 body,
-                env: env.clone(),
+                env: image.snapshot(),
             };
 
             let mac = Value::Macro(Macro { params, closure });
@@ -768,8 +778,7 @@ pub fn execute_special(
                 image.insert(name, Rc::new(mac.clone()));
             }
 
-            let env = image.e.clone();
-            Ok((mac, env))
+            Ok(mac)
         }
 
         // `macroexpand`: call the macro's closure with unevaluated args
@@ -809,13 +818,9 @@ pub fn execute_special(
                 .map(|(i, _)| arg.nth(i + 1))
                 .collect();
 
-            // call the closure to get the expanded form
-            let orig_env = image.e.clone();
-            let mut temp_env = orig_env.clone();
-            m.closure.env.iter().for_each(|(k, v)| {
-                temp_env.insert(k.clone(), Rc::clone(v));
-            });
-            image.e = temp_env;
+            // push captured env + params frame, evaluate, pop both
+            image.push_env(&m.closure.env);  // O(1) — Rc::clone
+            image.push_frame();
             m.params
                 .iter()
                 .zip(arg_vals.into_iter())
@@ -823,11 +828,12 @@ pub fn execute_special(
                     image.insert((**param).clone(), val);
                 });
 
-            let expanded = evaluate(Rc::clone(&m.closure.body), image)?.0;
-            image.e = orig_env;
+            let expanded = evaluate(Rc::clone(&m.closure.body), image);
 
-            // return the expanded sexp as a value, don't execute it
-            Ok((expanded, image.e.clone()))
+            image.pop_frame();
+            image.pop_frame();
+
+            expanded
         }
 
         // --- arrays ---
@@ -852,7 +858,7 @@ pub fn execute_special(
                     _ => return Err("array: argument must be a list."),
                 }
             }
-            Ok((Value::array(v), env))
+            Ok(Value::array(v))
         }
 
         // `(full n value)` — create a new array of n copies of value
@@ -860,7 +866,7 @@ pub fn execute_special(
             let (l, r) = extract_numeric_binop(sexp.clone(), image)?;
             let n = l.as_i32().map_err(|_| "full: first arg must be an integer.")? as usize;
             let val = r.as_u32().map_err(|_| "full: second arg must be a u32.")?;
-            Ok((Value::array_fill(n, val), env))
+            Ok(Value::array_fill(n, val))
         }
 
         // `(unpack array)` — convert a Value::Array back to a lisp list
@@ -875,7 +881,7 @@ pub fn execute_special(
                         result,
                     );
                 }
-                Ok((result, env))
+                Ok(result)
             } else {
                 Err("unpack: argument must be an array.")
             }
@@ -884,8 +890,8 @@ pub fn execute_special(
         // `(getidx target n)` — get u32 at index n.
         // target: Array (bounds-checked) or Addr (raw, reads at addr+n*4).
         Special::GetIdx => {
-            let target = evaluate(sexp.nth(1), image)?.0;
-            let idx_val = evaluate(sexp.nth(2), image)?.0;
+            let target = evaluate(sexp.nth(1), image)?;
+            let idx_val = evaluate(sexp.nth(2), image)?;
             let i = extract_usize(&idx_val, "getidx: index")?;
             let val = match &target {
                 Value::Array(a) => {
@@ -899,15 +905,15 @@ pub fn execute_special(
                 }
                 _ => return Err("getidx: first arg must be an array or address."),
             };
-            Ok((Value::Number(Number::Unsigned(val)), env))
+            Ok(Value::Number(Number::Unsigned(val)))
         }
 
         // `(putidx target n val)` — set u32 at index n.
         // target: Array (bounds-checked, mutates in place) or Addr (raw write at addr+n*4).
         Special::PutIdx => {
-            let target = evaluate(sexp.nth(1), image)?.0;
-            let idx_val = evaluate(sexp.nth(2), image)?.0;
-            let val_val = evaluate(sexp.nth(3), image)?.0;
+            let target = evaluate(sexp.nth(1), image)?;
+            let idx_val = evaluate(sexp.nth(2), image)?;
+            let val_val = evaluate(sexp.nth(3), image)?;
             let i = extract_usize(&idx_val, "putidx: index")?;
             let val = extract_u32(&val_val, "putidx: value")?;
             match &target {
@@ -922,15 +928,15 @@ pub fn execute_special(
                 }
                 _ => return Err("putidx: first arg must be an array or address."),
             }
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         // `(readidx target offset n)` — read n u32s starting at offset into a list.
         // target: Array (bounds-checked) or Addr (raw, reads at addr+(offset+i)*4).
         Special::ReadIdx => {
-            let target = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
+            let target = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
             let offset = extract_usize(&off_val, "readidx: offset")?;
             let count = extract_usize(&n_val, "readidx: count")?;
             let mut result = Value::Nil;
@@ -957,15 +963,15 @@ pub fn execute_special(
                 }
                 _ => return Err("readidx: first arg must be an array or address."),
             }
-            Ok((result, env))
+            Ok(result)
         }
 
         // `(fillidx target offset list)` — write list values starting at offset.
         // target: Array (bounds-checked) or Addr (raw write at addr+(offset+i)*4).
         Special::FillIdx => {
-            let target = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let list_val = evaluate(sexp.nth(3), image)?.0;
+            let target = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let list_val = evaluate(sexp.nth(3), image)?;
             let offset = extract_usize(&off_val, "fillidx: offset")?;
             match &target {
                 Value::Array(a) => {
@@ -1005,16 +1011,16 @@ pub fn execute_special(
                 }
                 _ => return Err("fillidx: first arg must be an array or address."),
             }
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
 
         // `(fullidx target offset n val)` — fill n slots starting at offset with val.
         // target: Array (bounds-checked) or Addr (raw write at addr+(offset+i)*4).
         Special::FullIdx => {
-            let target = evaluate(sexp.nth(1), image)?.0;
-            let off_val = evaluate(sexp.nth(2), image)?.0;
-            let n_val = evaluate(sexp.nth(3), image)?.0;
-            let val_val = evaluate(sexp.nth(4), image)?.0;
+            let target = evaluate(sexp.nth(1), image)?;
+            let off_val = evaluate(sexp.nth(2), image)?;
+            let n_val = evaluate(sexp.nth(3), image)?;
+            let val_val = evaluate(sexp.nth(4), image)?;
             let offset = extract_usize(&off_val, "fullidx: offset")?;
             let count = extract_usize(&n_val, "fullidx: count")?;
             let val = extract_u32(&val_val, "fullidx: value")?;
@@ -1033,7 +1039,7 @@ pub fn execute_special(
                 }
                 _ => return Err("fullidx: first arg must be an array or address."),
             }
-            Ok((Value::Nil, env))
+            Ok(Value::Nil)
         }
     }
 }

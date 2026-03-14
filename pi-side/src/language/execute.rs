@@ -3,48 +3,68 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::ast::Value;
-use super::environment::{Environment, Image};
+use super::ast::{Closure, Value};
+use super::environment::Image;
 use super::special::execute_special;
 use super::syscalls::execute_syscall;
 
 /// Call a closure with already-prepared argument values.
-/// Handles environment save/restore and scope layering.
+/// Contains the trampoline loop for tail-call optimization:
+/// if the body returns a TailCall token, rebind params and loop
+/// instead of recursing.
 fn call_closure(
-    c: &super::ast::Closure,
+    c: &Closure,
     arg_vals: Vec<Rc<Value>>,
     image: &mut Image,
-) -> Result<(Value, Environment), &'static str> {
-    let orig_env = image.e.clone();
+) -> Result<Value, &'static str> {
+    let mut closure = c.clone();
+    let mut args = arg_vals;
 
-    // build closure scope: (1) caller -> (2) captured -> (3) params
-    let mut temp_env = orig_env.clone();
-    c.env.iter().for_each(|(k, v)| {
-        temp_env.insert(k.clone(), Rc::clone(v));
-    });
-    image.e = temp_env;
+    loop {
+        // push captured env as a shared frame — O(1), just Rc::clone
+        image.push_env(&closure.env);
+        // push a fresh frame for parameter bindings
+        image.push_frame();
 
-    c.params
-        .iter()
-        .zip(arg_vals.into_iter())
-        .for_each(|(param, val)| {
-            image.insert((**param).clone(), val);
-        });
+        closure
+            .params
+            .iter()
+            .zip(args.into_iter())
+            .for_each(|(param, val)| {
+                image.insert((**param).clone(), val);
+            });
 
-    let body_result = evaluate(Rc::clone(&c.body), image);
+        // body is always in tail position
+        let result = eval(Rc::clone(&closure.body), image, true)?;
 
-    let return_env = orig_env.clone();
-    image.e = orig_env;
+        image.pop_frame(); // params
+        image.pop_frame(); // captured env
 
-    body_result.map(|(v, _)| (v, return_env))
+        match result {
+            Value::TailCall(next_closure, next_args) => {
+                // tail call — reuse this stack frame
+                closure = next_closure;
+                args = next_args;
+            }
+            other => return Ok(other),
+        }
+    }
 }
 
-/// Evaluate a value: if it's a fundamental value (nil, bool, number, string,
-/// closure, macro, special), return it as-is. If it's a symbol, look it up.
-/// If it's a list (cons), execute it.
+/// Public API: evaluate an expression (never in tail position).
 #[allow(unused)]
-pub fn evaluate(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment), &'static str> {
-    let env = image.e.clone();
+pub fn evaluate(sexp: Rc<Value>, image: &mut Image) -> Result<Value, &'static str> {
+    eval(sexp, image, false)
+}
+
+/// Internal: evaluate with tail-position flag.
+/// When `tail` is true and the result would be a closure call,
+/// returns a TailCall token instead of actually calling.
+pub(super) fn eval(
+    sexp: Rc<Value>,
+    image: &mut Image,
+    tail: bool,
+) -> Result<Value, &'static str> {
     match &*sexp {
         // fundamental values — return as-is
         Value::Nil
@@ -55,37 +75,46 @@ pub fn evaluate(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environmen
         | Value::Macro(_)
         | Value::Special(_)
         | Value::Syscall(_)
-        | Value::Array(_) => Ok(((*sexp).clone(), env)),
+        | Value::Array(_) => Ok((*sexp).clone()),
+
+        // TailCall should never appear in source — only as trampoline tokens
+        Value::TailCall(_, _) => Ok((*sexp).clone()),
 
         // symbol — look up in environment
         Value::Symbol(s) => match image.get(s) {
-            Some(v) => Ok(((*v).clone(), env)),
+            Some(v) => Ok((*v).clone()),
             None => Err("Unknown symbol."),
         },
 
         // list — execute it
-        Value::Cons(..) => execute(sexp, image),
+        Value::Cons(..) => exec(sexp, image, tail),
     }
 }
 
 /// Execute a list sexp: the car is the action, dispatch on its type.
-fn execute(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment), &'static str> {
+fn exec(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'static str> {
     let action = sexp.car();
 
-    // evaluate the head to figure out what we're calling
-    let (resolved, _) = evaluate(action, image)?;
+    // evaluate the head to figure out what we're calling (never tail)
+    let resolved = evaluate(action, image)?;
 
-    match &resolved {
+    // match by value so we can move Closure into TailCall without cloning
+    match resolved {
         Value::Closure(c) => {
-            // evaluate arguments in caller's scope
+            // evaluate arguments in caller's scope (never tail)
             let arg_vals: Vec<Rc<Value>> = c
                 .params
                 .iter()
                 .enumerate()
-                .map(|(i, _)| evaluate(sexp.nth(i + 1), image).map(|(v, _)| Rc::new(v)))
+                .map(|(i, _)| evaluate(sexp.nth(i + 1), image).map(|v| Rc::new(v)))
                 .collect::<Result<_, _>>()?;
 
-            call_closure(c, arg_vals, image)
+            if tail {
+                // in tail position: return token, move closure — no clone
+                Ok(Value::TailCall(c, arg_vals))
+            } else {
+                call_closure(&c, arg_vals, image)
+            }
         }
         Value::Macro(m) => {
             // call the closure with UNEVALUATED args (raw sexps)
@@ -97,10 +126,11 @@ fn execute(sexp: Rc<Value>, image: &mut Image) -> Result<(Value, Environment), &
                 .collect();
 
             // the closure returns the expanded sexp — then evaluate it
-            let (expanded, _) = call_closure(&m.closure, arg_vals, image)?;
-            evaluate(Rc::new(expanded), image)
+            // propagate tail: if macro call is in tail position, so is its expansion
+            let expanded = call_closure(&m.closure, arg_vals, image)?;
+            eval(Rc::new(expanded), image, tail)
         }
-        Value::Special(s) => execute_special(s.clone(), sexp, image),
+        Value::Special(s) => execute_special(s.clone(), sexp, image, tail),
         Value::Syscall(s) => execute_syscall(s.clone(), sexp, image),
         _ => Err("Cannot execute: head is not callable."),
     }

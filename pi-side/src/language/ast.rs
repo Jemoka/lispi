@@ -32,7 +32,7 @@ pub type Symbol = String<SYMB_NAME_LEN>;
 pub struct Closure {
     pub params: Vec<Rc<Symbol>>,
     pub body: Rc<Value>,
-    pub env: environment::Environment,
+    pub env: Rc<environment::Environment>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +54,8 @@ pub enum Value {
     Macro(Macro),
     Syscall(Syscall),
     Array(Rc<RefCell<Vec<u32>>>),
+    /// Internal: tail-call trampoline token. Never escapes call_closure.
+    TailCall(Closure, Vec<Rc<Value>>),
 }
 
 impl Value {
@@ -130,6 +132,7 @@ impl fmt::Display for Value {
             Value::Macro(_) => write!(f, "<macro>"),
             Value::Syscall(s) => write!(f, "<syscall:{:?}>", s),
             Value::Array(a) => write!(f, "<array:{}>", a.borrow().len()),
+            Value::TailCall(_, _) => write!(f, "<tailcall>"),
             Value::Cons(_, _) => {
                 write!(f, "(")?;
                 let mut current: &Value = self;
