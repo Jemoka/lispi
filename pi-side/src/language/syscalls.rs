@@ -11,6 +11,8 @@ use super::execute::evaluate;
 use crate::comm::uart;
 use crate::utils::memory::{dsb, get32, prefetch_flush, put32};
 
+static BAD_APPLE: &[u8] = include_bytes!("apple.bin");
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Syscall {
     Get32,
@@ -28,13 +30,18 @@ pub enum Syscall {
     Fill32,
     Full32,
     Ldr,
-    Str
+    Str,
+    Apple,
+    Unpack1to16,
 }
 
 impl Syscall {
     /// Look up a syscall by name (case-insensitive).
     /// Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("apple") {
+            return Some(Self::Apple);
+        }
         if name.eq_ignore_ascii_case("get32") {
             return Some(Self::Get32);
         }
@@ -83,6 +90,9 @@ impl Syscall {
         if name.eq_ignore_ascii_case("str") {
             return Some(Self::Str);
         }
+        if name.eq_ignore_ascii_case("unpack1to16") {
+            return Some(Self::Unpack1to16);
+        }
         None
     }
 }
@@ -93,6 +103,20 @@ pub fn execute_syscall(
     image: &mut Image,
 ) -> Result<Value, &'static str> {
     match syscall {
+        Syscall::Apple => {
+            // Returns (addr nframes) pointing to the raw 1bpp Bad Apple data.
+            // Each frame is 320x240 pixels at 1bpp = 9600 bytes.
+            let bytes_per_frame = 320 / 8 * 240; // 9600
+            let num_frames = BAD_APPLE.len() / bytes_per_frame;
+            let ptr = BAD_APPLE.as_ptr() as usize;
+            Ok(Value::cons(
+                Value::Number(super::number::Number::Addr(ptr)),
+                Value::cons(
+                    Value::Number(super::number::Number::Integer(num_frames as i32)),
+                    Value::Nil,
+                ),
+            ))
+        }
         Syscall::Get32 => {
             let addr = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &addr {
@@ -410,16 +434,19 @@ pub fn execute_syscall(
             Ok(Value::Nil)
         }
 
-        // (@ldr addr offset n) — load n u32 slots from memory into a new array.
+        // (@ldr addr-or-array offset n) — load n u32 slots into a new array.
+        // Source can be an address or an array (uses backing pointer).
         Syscall::Ldr => {
             let addr_val = evaluate(sexp.nth(1), image)?;
             let off_val = evaluate(sexp.nth(2), image)?;
             let n_val = evaluate(sexp.nth(3), image)?;
-            let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "ldr: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
-            } else {
-                return Err("ldr: first arg must be an address.");
+            let base = match &addr_val {
+                Value::Number(n) => {
+                    let a = n.as_addr().map_err(|_| "ldr: first arg must be an address or array.")?;
+                    if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                }
+                Value::Array(a) => a.borrow().as_ptr() as usize,
+                _ => return Err("ldr: first arg must be an address or array."),
             };
             let offset = if let Value::Number(n) = &off_val {
                 n.as_i32().map_err(|_| "ldr: offset must be an integer.")? as usize
@@ -431,23 +458,25 @@ pub fn execute_syscall(
             } else {
                 return Err("ldr: count must be a number.");
             };
-            let src = (base + offset * 4) as *const u32;
+            let src = (base + offset * 4) as *const u8;
             let mut v = alloc::vec![0u32; count];
-            unsafe { core::ptr::copy_nonoverlapping(src, v.as_mut_ptr(), count) };
+            unsafe { core::ptr::copy_nonoverlapping(src, v.as_mut_ptr() as *mut u8, count * 4) };
             Ok(Value::array(v))
         }
 
-        // (@str addr offset array) — copy array contents to addr + offset*4
-        // using copy_nonoverlapping (memcpy).
+        // (@str addr-or-array offset array) — copy array contents to dest + offset*4
+        // dest can be an address or an array (uses backing pointer).
         Syscall::Str => {
             let addr_val = evaluate(sexp.nth(1), image)?;
             let off_val = evaluate(sexp.nth(2), image)?;
             let arr_val = evaluate(sexp.nth(3), image)?;
-            let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "str: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
-            } else {
-                return Err("str: first arg must be an address.");
+            let base = match &addr_val {
+                Value::Number(n) => {
+                    let a = n.as_addr().map_err(|_| "str: first arg must be an address or array.")?;
+                    if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                }
+                Value::Array(a) => a.borrow().as_ptr() as usize,
+                _ => return Err("str: first arg must be an address or array."),
             };
             let offset = if let Value::Number(n) = &off_val {
                 n.as_i32().map_err(|_| "str: offset must be an integer.")? as usize
@@ -463,6 +492,45 @@ pub fn execute_syscall(
                 Ok(Value::Nil)
             } else {
                 Err("str: third arg must be an array.")
+            }
+        }
+
+        // (@unpack1to16 src dst) — expand 1bpp packed array into 16bpp.
+        // Each bit in src becomes one u16 in dst (0x0000 or 0xFFFF).
+        // src has N u32 words (N*32 pixels), dst needs N*16 u32 words.
+        // Reads source bytes directly to avoid endian confusion.
+        Syscall::Unpack1to16 => {
+            let src_val = evaluate(sexp.nth(1), image)?;
+            let dst_val = evaluate(sexp.nth(2), image)?;
+            if let (Value::Array(src), Value::Array(dst)) = (&src_val, &dst_val) {
+                let src_b = src.borrow();
+                let mut dst_b = dst.borrow_mut();
+                if dst_b.len() < src_b.len() * 16 {
+                    return Err("unpack1to16: dst array too small.");
+                }
+                // Reinterpret src as bytes to avoid endian issues
+                let src_bytes: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        src_b.as_ptr() as *const u8,
+                        src_b.len() * 4,
+                    )
+                };
+                let dst_u16: &mut [u16] = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        dst_b.as_mut_ptr() as *mut u16,
+                        dst_b.len() * 2,
+                    )
+                };
+                let mut pixel = 0usize;
+                for &byte in src_bytes.iter() {
+                    for bit in (0..8).rev() {
+                        dst_u16[pixel] = if (byte >> bit) & 1 != 0 { 0xFFFF } else { 0x0000 };
+                        pixel += 1;
+                    }
+                }
+                Ok(Value::Nil)
+            } else {
+                Err("unpack1to16: both arguments must be arrays.")
             }
         }
     }

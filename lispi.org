@@ -155,8 +155,8 @@ Parallel to the list-based ops above, but transfer entire Arrays in one shot.
 
 | Syscall                    | Description                                           |
 |----------------------------+-------------------------------------------------------|
-| ~(@ldr addr offset n)~     | Load n u32 slots → Array (~copy_nonoverlapping~).     |
-| ~(@str addr offset array)~ | Store Array to addr+offset*4 (~copy_nonoverlapping~). |
+| ~(@ldr src offset n)~      | Load n u32 slots → Array. src: Addr or Array.         |
+| ~(@str dst offset array)~  | Store Array to dst+offset*4. dst: Addr or Array.      |
 
 ** Memory Barriers
 
@@ -185,3 +185,10 @@ Parallel to the list-based ops above, but transfer entire Arrays in one shot.
 | Syscall              | Description                                    |
 |----------------------+------------------------------------------------|
 | ~(@delay n)~         | Busy-wait loop; n iterations of a nop.         |
+
+** Video
+
+| Syscall                        | Description                                            |
+|--------------------------------+--------------------------------------------------------|
+| ~(@apple)~                     | Returns ~(addr nframes)~ for baked-in Bad Apple 1bpp data (320x240). |
+| ~(@unpack1to16 src dst)~       | Expand 1bpp Array to 16bpp Array (0x0000/0xFFFF).      |

@@ -27,10 +27,13 @@
 (defun repeat (n val)
   (if (eq n 0) nil
     (cons val (repeat (- n 1) val))))
+(defun append (a b)
+  (if (nullp a) b
+    (cons (car a) (append (cdr a) b))))
 
 ;;;; buffer management ;;;;
 ;; getidx/putidx/readidx/fillidx work on both Arrays and Addrs
-;; for bulk memcpy to/from hardware: @ldr, @str
+;; for bulk memcpy to/from hardware: @ldr, @str (both accept Addrs or Arrays)
 (defun max (a b)
   (if (> a b) a b))
 
@@ -248,15 +251,16 @@
 
 ;; allocate framebuffer with all properties in one mailbox call
 ;; returns (base-addr size) from the alloc tag response
-(defun framebuf/alloc ()
+(defun framebuf/alloc (vw vh depth)
   (let (results (mbox/talkmany
-                 (list (list framebuf/PHYSICAL-WH '(1920 1080))
-                       (list framebuf/VIRTUAL-WH '(1920 1080))
-                       (list framebuf/COLOR-DEPTH '(32))
+                 (list (list framebuf/PHYSICAL-WH (list 1920 1080))
+                       (list framebuf/VIRTUAL-WH (list vw vh))
+                       (list framebuf/COLOR-DEPTH (list depth))
                        (list framebuf/PIXEL-ORDER '(1))
-                       (list framebuf/ALLOC '(32)))))
+                       (list framebuf/ALLOC '(16)))))
     (nth 4 results)))
 
+;; for 32 bit colours
 ;; pixel layout is [24-31] alpha, [16-23] red, [8-15] green, [0-7] blue
 (defun framebuf/pack-rgb (r g b)
   (binor (<< r 16) (binor (<< g 8) b)))
@@ -279,39 +283,37 @@
      (drawing/row img x y w width color)
      (drawing/rect img x (+ y 1) w (- h 1) width color))))
 
-;; (let (fbuf (framebuf/alloc))
-;;   (let (base (g2p (addr (car fbuf)))
-;;              img (full (* 1920 1080) 0))
-;;     (begin
-;;      (drawing/rect img 10 10 50 50 1920 (framebuf/pack-rgb 255 0 0))
-;;      (@str base 0 img))))
-
-;; (framebuf/pack-rgb 255 0 0)
-;; (+ 1 2)
-
-
-;; (set img (full (* 1920 1080) 0))
-;; (set w 1920)
-;; (drawing/rect img 0 0 1920 200 w (framebuf/pack-rgb 20 20 60))
-
-;; (drawing/rect img 0 0 10 200 w (framebuf/pack-rgb 20 20 60))
-
-;;;; fun rectangle demo ;;;;
-
-(set fbuf (framebuf/alloc))
+;;;; interactive framebuffer demo ;;;;
+(set fbuf (framebuf/alloc 1920 1080 32))
 (set base (g2p (addr (car fbuf))))
 (set img (full (* 1920 1080) 0))
-(set w 1920)
 
-(drawing/rect img 0 0 1920 200 w (framebuf/pack-rgb 20 20 60))
-(drawing/rect img 0 200 1920 200 w (framebuf/pack-rgb 30 30 80))
-(drawing/rect img 0 400 1920 200 w (framebuf/pack-rgb 40 40 100))
-(drawing/rect img 0 600 1920 200 w (framebuf/pack-rgb 50 50 120))
-(drawing/rect img 0 800 1920 280 w (framebuf/pack-rgb 60 60 140))
-
-(drawing/rect img 100 100 300 300 w (framebuf/pack-rgb 220 40 40))
-(drawing/rect img 250 200 300 300 w (framebuf/pack-rgb 40 200 40))
-(drawing/rect img 50 520 800 60 w (framebuf/pack-rgb 255 220 30))
-(+ 1 1)
-
+(drawing/rect img 10 10 50 50 1920 (framebuf/pack-rgb 255 0 0))
+(drawing/rect img 100 200 50 50 1920 (framebuf/pack-rgb 0 255 0))
+(drawing/rect img 100 200 50 50 1920 (framebuf/pack-rgb 0 255 0))
 (@str base 0 img)
+
+;;;; 1bpp video playback ;;;;
+(defun video/play (base data width height nframes delay)
+  (let (packed-words (/ (* width height) 32)
+        buf (full (/ (* width height) 2) 0))
+    (begin
+     (defun video/-loop (frame)
+       (if (eq frame nframes) nil
+         (begin
+          (@unpack1to16
+            (@ldr data (* frame packed-words) packed-words)
+            buf)
+          (@str base 0 buf)
+          (@delay delay)
+          (video/-loop (+ frame 1)))))
+     (video/-loop 0))))
+
+
+;;;; mmmm ;;;;
+(let (info (@apple))
+  (let (data (car info)
+             nframes (nth 1 info)
+             fbuf (framebuf/alloc 320 240 16))
+    (let (base (g2p (addr (car fbuf))))
+      (video/play base data 320 240 nframes  270000))))
