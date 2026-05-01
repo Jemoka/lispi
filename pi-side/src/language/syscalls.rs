@@ -172,11 +172,11 @@ pub fn execute_syscall(
             };
 
             Ok(Value::cons(
-                Value::Number(super::number::Number::Integer(clocks as i32)),
+                Value::Number(super::number::Number::Unsigned(clocks as u32)),
                 Value::cons (
-                    Value::Number(super::number::Number::Integer(icachemiss as i32)),
+                    Value::Number(super::number::Number::Unsigned(icachemiss as u32)),
                     Value::cons (
-                        Value::Number(super::number::Number::Integer(branchmiss as i32)),
+                        Value::Number(super::number::Number::Unsigned(branchmiss as u32)),
                         Value::Nil
                     )
                 )

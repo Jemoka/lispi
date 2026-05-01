@@ -31,6 +31,32 @@
   (if (nullp a) b
     (cons (car a) (append (cdr a) b))))
 
+
+;;; cheeky measuremenst
+(@monitor/get)
+
+(defun test ()
+  (begin
+   (@monitor/clear)
+   (let (start (@monitor/get))
+     (begin
+      (+ 1 1)
+      (- (car start) (car (@monitor/get)))))))
+
+(begin
+ (@monitor/clear)
+ (let (start (@monitor/get))
+   (begin
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (+ 1 1)
+    (- (cadr (@monitor/get)) (cadr start)))))
+
 ;;;; buffer management ;;;;
 ;; getidx/putidx/readidx/fillidx work on both Arrays and Addrs
 ;; for bulk memcpy to/from hardware: @ldr, @str (both accept Addrs or Arrays)
