@@ -1,6 +1,7 @@
 //! LISP Syscall Infrastructure
 
 use alloc::rc::Rc;
+use proc_bitfield::{bitfield, ConvRaw};
 
 use core::alloc::Layout;
 
@@ -33,6 +34,9 @@ pub enum Syscall {
     Str,
     Apple,
     Unpack1to16,
+    ClearSetMonitor,
+    GetMonitor,
+    StopMonitor
 }
 
 impl Syscall {
@@ -93,7 +97,50 @@ impl Syscall {
         if name.eq_ignore_ascii_case("unpack1to16") {
             return Some(Self::Unpack1to16);
         }
+        if name.eq_ignore_ascii_case("monitor/clear") {
+            return Some(Self::ClearSetMonitor);
+        }
+        if name.eq_ignore_ascii_case("monitor/get") {
+            return Some(Self::GetMonitor);
+        }
+        if name.eq_ignore_ascii_case("monitor/stop") {
+            return Some(Self::StopMonitor);
+        }
         None
+    }
+}
+
+
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ConvRaw)]
+pub enum PMUEvent {
+    ICacheMiss = 0x00,
+    IMicroTLBMiss = 0x3,
+    DMicroTLBMiss = 0x4,
+    BranchExecuted = 0x5,
+    BranchMiss = 0x6,
+    DCacheMiss = 0xB,
+    MainTLBMiss = 0xF,
+    
+}
+
+bitfield! {
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct PMUControlReg(pub u32): Debug, FromStorage, IntoStorage {
+        pub enabled: bool @ 0, // enable all counters
+        pub resetbufs: bool @ 1, // reset event counter buffers
+        pub resetcycle: bool @ 2, // reset cycle counter
+        pub divider: bool @ 3, // cycle counter counts every 64 cycles if set
+        pub ctr0interrupt: bool @ 4, // interrupt reporting ctr0 
+        pub ctr1interrupt: bool @ 5, // interrupt reporting ctr0 
+        pub cycleinterrupt: bool @ 6, // interrupt reporting cycle counter
+        // sbz @ 7
+        pub ctr0overflow: bool @ 8, // ctr0 overflow flag
+        pub ctr1overflow: bool @ 9, // ctr1 overflow flag
+        pub cycleoverflow: bool @ 10, // cycle counter overflow flag
+        pub export: bool @ 11, // export events to external pin
+        pub event0: u8 [unwrap PMUEvent] @ 12..=19, // event type for ctr0
+        pub event1: u8 [unwrap PMUEvent] @ 20..=27, // event type for
     }
 }
 
@@ -103,6 +150,61 @@ pub fn execute_syscall(
     image: &mut Image,
 ) -> Result<Value, &'static str> {
     match syscall {
+        Syscall::GetMonitor => {
+            let clocks = unsafe {
+                let val: u32;
+                ::core::arch::asm!("mrc p15, 0, {val}, c15, c12, 1", val=out(reg) val);
+                val
+            };
+
+            let icachemiss = unsafe {
+                // this is hardcoded event 0 for now...
+                let val: u32;
+                ::core::arch::asm!("mrc p15, 0, {val}, c15, c12, 2", val=out(reg) val);
+                val
+            };
+
+            let branchmiss = unsafe {
+                // this is hardcoded event 1 for now...
+                let val: u32;
+                ::core::arch::asm!("mrc p15, 0, {val}, c15, c12, 3", val=out(reg) val);
+                val
+            };
+
+            Ok(Value::cons(
+                Value::Number(super::number::Number::Integer(clocks as i32)),
+                Value::cons (
+                    Value::Number(super::number::Number::Integer(icachemiss as i32)),
+                    Value::cons (
+                        Value::Number(super::number::Number::Integer(branchmiss as i32)),
+                        Value::Nil
+                    )
+                )
+            ))
+        }
+        Syscall::ClearSetMonitor => {
+            unsafe {
+                let pmu_config = PMUControlReg::from(0)
+                    .with_enabled(true)
+                    .with_resetbufs(true)
+                    .with_resetcycle(true)
+                    .with_divider(false)
+                    .with_event0(PMUEvent::ICacheMiss)
+                    .with_event1(PMUEvent::BranchMiss);
+                let val: u32 = pmu_config.into();
+                ::core::arch::asm!("mcr p15, 0, {val}, c15, c12, 0", val = in(reg) val);
+            };
+            Ok(Value::Nil)
+        }
+        Syscall::StopMonitor => {
+            unsafe {
+                let pmu_config = PMUControlReg::from(0)
+                    .with_enabled(false);
+                let val: u32 = pmu_config.into();
+                ::core::arch::asm!("mcr p15, 0, {val}, c15, c12, 0", val = in(reg) val);
+            };
+            Ok(Value::Nil)
+        }
         Syscall::Apple => {
             // Returns (addr nframes) pointing to the raw 1bpp Bad Apple data.
             // Each frame is 320x240 pixels at 1bpp = 9600 bytes.

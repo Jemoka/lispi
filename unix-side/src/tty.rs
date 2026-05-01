@@ -8,6 +8,7 @@ const TTY_PREFIXES: &[&str] = &[
     "ttyUSB",      // linux
     "ttyACM",      // linux
     "cu.SLAB_USB", // mac os
+    "cu.usbserial", // mac os
 ];
 
 /// Find a /dev/ttyUSB* (or equivalent) device.
