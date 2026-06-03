@@ -12,7 +12,7 @@ use super::execute::evaluate;
 use crate::comm::uart;
 use crate::utils::memory::{dsb, get32, prefetch_flush, put32};
 
-static BAD_APPLE: &[u8] = include_bytes!("apple.bin");
+// static BAD_APPLE: &[u8] = include_bytes!("apple.bin");
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Syscall {
@@ -32,7 +32,7 @@ pub enum Syscall {
     Full32,
     Ldr,
     Str,
-    Apple,
+    // Apple,
     Unpack1to16,
     ClearSetMonitor,
     GetMonitor,
@@ -43,9 +43,9 @@ impl Syscall {
     /// Look up a syscall by name (case-insensitive).
     /// Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case("apple") {
-            return Some(Self::Apple);
-        }
+        // if name.eq_ignore_ascii_case("apple") {
+        //     return Some(Self::Apple);
+        // }
         if name.eq_ignore_ascii_case("get32") {
             return Some(Self::Get32);
         }
@@ -205,20 +205,20 @@ pub fn execute_syscall(
             };
             Ok(Value::Nil)
         }
-        Syscall::Apple => {
-            // Returns (addr nframes) pointing to the raw 1bpp Bad Apple data.
-            // Each frame is 320x240 pixels at 1bpp = 9600 bytes.
-            let bytes_per_frame = 320 / 8 * 240; // 9600
-            let num_frames = BAD_APPLE.len() / bytes_per_frame;
-            let ptr = BAD_APPLE.as_ptr() as usize;
-            Ok(Value::cons(
-                Value::Number(super::number::Number::Addr(ptr)),
-                Value::cons(
-                    Value::Number(super::number::Number::Integer(num_frames as i32)),
-                    Value::Nil,
-                ),
-            ))
-        }
+        // Syscall::Apple => {
+        //     // Returns (addr nframes) pointing to the raw 1bpp Bad Apple data.
+        //     // Each frame is 320x240 pixels at 1bpp = 9600 bytes.
+        //     let bytes_per_frame = 320 / 8 * 240; // 9600
+        //     let num_frames = BAD_APPLE.len() / bytes_per_frame;
+        //     let ptr = BAD_APPLE.as_ptr() as usize;
+        //     Ok(Value::cons(
+        //         Value::Number(super::number::Number::Addr(ptr)),
+        //         Value::cons(
+        //             Value::Number(super::number::Number::Integer(num_frames as i32)),
+        //             Value::Nil,
+        //         ),
+        //     ))
+        // }
         Syscall::Get32 => {
             let addr = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &addr {

@@ -108,6 +108,8 @@ pub fn flush_tx() {
 
 pub fn flush() {
     flush_tx();
+    while has_data() { get8(); }
+        
 }
 
 pub fn write_bytes(bytes: &[u8]) {

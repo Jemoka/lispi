@@ -4,7 +4,10 @@
 //!
 //! Syntax:
 //!   (a b c)              — list (cons chain ending in nil)
-//!   '(a b c)             — quote sugar: desugars to (list a b c)
+//!   'x                   — quote: desugars to (quote x)
+//!   `x                   — quasiquote: desugars to (quasiquote x)
+//!   ,x                   — unquote: desugars to (unquote x)
+//!   ,@x                  — unquote-splicing: desugars to (unquote-splicing x)
 //!   @name                — syscall (case-insensitive): get32, put32, dsb, prefetch_flush
 //!   #42  #0xFF  #0b101   — address literal (decimal, 0x hex, 0b binary)
 //!   u42  u0xFF  u0b101   — unsigned literal (decimal, 0x hex, 0b binary)
@@ -254,20 +257,39 @@ fn parse_syscall(input: &str) -> IResult<&str, Value> {
 // quote sugar
 // ---------------------------------------------------------------------------
 
-/// Parse 'expr — desugars to (list ...).
-/// '(a b c) → (list a b c) — prepend List as head of the cons chain.
-/// 'atom    → (list atom)  — wrap in a single-element list call.
+/// Wrap `inner` as `(head inner)`.
+fn wrap_special(head: Special, inner: Value) -> Value {
+    Value::cons(
+        Value::Special(head),
+        Value::cons(inner, Value::Nil),
+    )
+}
+
+/// Parse 'expr — desugars to (quote expr). Returns expr literally, unevaluated.
 fn parse_quote(input: &str) -> IResult<&str, Value> {
     let (rest, _) = char('\'')(input)?;
     let (rest, inner) = parse_value(rest)?;
-    let quoted = match inner {
-        Value::Cons(_, _) => Value::Cons(Rc::new(Value::Special(Special::List)), Rc::new(inner)),
-        _ => Value::cons(
-            Value::Special(Special::List),
-            Value::cons(inner, Value::Nil),
-        ),
+    Ok((rest, wrap_special(Special::Quote, inner)))
+}
+
+/// Parse `expr — desugars to (quasiquote expr).
+fn parse_quasiquote(input: &str) -> IResult<&str, Value> {
+    let (rest, _) = char('`')(input)?;
+    let (rest, inner) = parse_value(rest)?;
+    Ok((rest, wrap_special(Special::Quasiquote, inner)))
+}
+
+/// Parse ,expr → (unquote expr); ,@expr → (unquote-splicing expr).
+fn parse_unquote(input: &str) -> IResult<&str, Value> {
+    let (rest, _) = char(',')(input)?;
+    let (rest, splice) = opt(char('@')).parse(rest)?;
+    let (rest, inner) = parse_value(rest)?;
+    let head = if splice.is_some() {
+        Special::UnquoteSplicing
+    } else {
+        Special::Unquote
     };
-    Ok((rest, quoted))
+    Ok((rest, wrap_special(head, inner)))
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +479,8 @@ fn parse_value(input: &str) -> IResult<&str, Value> {
         parse_address,
         parse_unsigned,
         parse_quote,
+        parse_quasiquote,
+        parse_unquote,
         parse_list,
         parse_syscall,
         parse_number,

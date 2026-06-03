@@ -53,6 +53,10 @@ pub enum Special {
     ReadIdx,
     FillIdx,
     FullIdx,
+    Quote,
+    Quasiquote,
+    Unquote,
+    UnquoteSplicing,
 }
 
 impl Special {
@@ -188,6 +192,18 @@ impl Special {
         if name.eq_ignore_ascii_case("fullidx") {
             return Some(Self::FullIdx);
         }
+        if name.eq_ignore_ascii_case("quote") {
+            return Some(Self::Quote);
+        }
+        if name.eq_ignore_ascii_case("quasiquote") {
+            return Some(Self::Quasiquote);
+        }
+        if name.eq_ignore_ascii_case("unquote") {
+            return Some(Self::Unquote);
+        }
+        if name.eq_ignore_ascii_case("unquote-splicing") {
+            return Some(Self::UnquoteSplicing);
+        }
         None
     }
 }
@@ -269,6 +285,69 @@ fn extract_addr(n: &Number, ctx: &'static str) -> Result<*mut u32, &'static str>
         Ok(a as *mut u32)
     } else {
         Err(ctx)
+    }
+}
+
+/// Append two lists. If `a` is improper, its tail is discarded and `b` is dropped.
+fn append_lists(a: Value, b: Value) -> Value {
+    let mut items: Vec<Value> = Vec::new();
+    let mut cur = a;
+    loop {
+        match cur {
+            Value::Nil => break,
+            Value::Cons(car, cdr) => {
+                items.push((*car).clone());
+                cur = (*cdr).clone();
+            }
+            other => return other,
+        }
+    }
+    let mut result = b;
+    for item in items.into_iter().rev() {
+        result = Value::cons(item, result);
+    }
+    result
+}
+
+/// Expand a quasiquoted form: walks the structure, evaluating (unquote x)
+/// and splicing (unquote-splicing x) within enclosing lists.
+fn quasiquote_expand(v: &Value, image: &mut Image) -> Result<Value, &'static str> {
+    if let Value::Cons(car, cdr) = v {
+        if matches!(&**car, Value::Special(Special::Unquote)) {
+            return match &**cdr {
+                Value::Cons(arg, _) => evaluate(Rc::clone(arg), image),
+                _ => Err("unquote: expected 1 argument."),
+            };
+        }
+        if matches!(&**car, Value::Special(Special::UnquoteSplicing)) {
+            return Err("unquote-splicing: not inside a list.");
+        }
+        return quasiquote_list(v, image);
+    }
+    Ok(v.clone())
+}
+
+fn quasiquote_list(v: &Value, image: &mut Image) -> Result<Value, &'static str> {
+    match v {
+        Value::Nil => Ok(Value::Nil),
+        Value::Cons(car, cdr) => {
+            // splicing: (... ,@x ...) — evaluate x and splice into result
+            if let Value::Cons(head, tail) = &**car {
+                if matches!(&**head, Value::Special(Special::UnquoteSplicing)) {
+                    let arg = match &**tail {
+                        Value::Cons(a, _) => Rc::clone(a),
+                        _ => return Err("unquote-splicing: expected 1 argument."),
+                    };
+                    let spliced = evaluate(arg, image)?;
+                    let rest = quasiquote_list(cdr, image)?;
+                    return Ok(append_lists(spliced, rest));
+                }
+            }
+            let new_car = quasiquote_expand(car, image)?;
+            let new_cdr = quasiquote_list(cdr, image)?;
+            Ok(Value::cons(new_car, new_cdr))
+        }
+        _ => Ok(v.clone()),
     }
 }
 
@@ -498,6 +577,34 @@ pub fn execute_special(
             }
             Ok(result)
         }
+
+        // --- quoting ---
+
+        // `quote`: return the argument literally, unevaluated.
+        Special::Quote => {
+            if !sexp.nth_exists(1) {
+                return Err("quote: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("quote: too many arguments.");
+            }
+            Ok((*sexp.nth(1)).clone())
+        }
+
+        // `quasiquote`: like quote, but (unquote x) evaluates x and
+        // (unquote-splicing x) splices a list result into the enclosing list.
+        Special::Quasiquote => {
+            if !sexp.nth_exists(1) {
+                return Err("quasiquote: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("quasiquote: too many arguments.");
+            }
+            quasiquote_expand(&sexp.nth(1), image)
+        }
+
+        Special::Unquote => Err("unquote: not inside a quasiquote."),
+        Special::UnquoteSplicing => Err("unquote-splicing: not inside a quasiquote."),
 
         // --- binding / closures ---
 

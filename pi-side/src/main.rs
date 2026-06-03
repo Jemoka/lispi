@@ -22,6 +22,12 @@ use comm::uart::PiUart;
 use shared::Framer;
 
 fn main() {
+    comm::uart::init();
+    comm::uart::flush();
+
+    println!("LISPI Taking over...");
+
+    comm::uart::flush();
 
     let mut img = language::Image::new();
     let mut framer = Framer::pi_side(PiUart);
