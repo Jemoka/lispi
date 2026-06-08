@@ -5,10 +5,10 @@ use std::thread;
 use std::time::Duration;
 
 const TTY_PREFIXES: &[&str] = &[
-    // "ttyUSB",      // linux
-    // "ttyACM",      // linux
+    "ttyUSB",      // linux
+    "ttyACM",      // linux
     "cu.SLAB_USB", // mac os
-    // "cu.usbserial", // mac os
+    "cu.usbserial", // mac os
 ];
 
 /// Find a /dev/ttyUSB* (or equivalent) device.
@@ -26,8 +26,7 @@ pub fn find_ttyusb() -> String {
 
     match entries.len() {
         0 => panic!("no ttyUSB device found in /dev"),
-        1 => format!("/dev/{}", entries[0].file_name().to_string_lossy()),
-        n => panic!("found {} ttyUSB devices, expected exactly 1", n),
+        _ => format!("/dev/{}", entries[0].file_name().to_string_lossy()),
     }
 }
 

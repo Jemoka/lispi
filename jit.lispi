@@ -1,10 +1,5 @@
 ;;;; helpers ;;
 
-(defmacro chicken (a b)
-  `(+ ,(car a) ,b))
-
-(chicken (8 2) 3)
-
 (defun nth (n l)
   (if (eq n 0)
       (car l)
@@ -38,7 +33,7 @@
     (cons (car a) (append (cdr a) b))))
 
 
-(append '(1 2 3 4 5) '(1 2 3 4 5))
+;; (append '(1 2 3 4 5) '(1 2 3 4 5))
 
-(hits append)
+;; (hits append)
 
