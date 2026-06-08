@@ -757,7 +757,6 @@ pub fn execute_special(
                 _ => return Err("jit: first argument must be a closure."),
             };
 
-            // Evaluate exactly arity-many dummy args.
             let mut dummies: Vec<Value> = Vec::with_capacity(closure.params.len());
             for i in 0..closure.params.len() {
                 if !sexp.nth_exists(i + 2) {
@@ -769,53 +768,14 @@ pub fn execute_special(
                 return Err("jit: too many dummy inputs for closure arity.");
             }
 
-            let input_types: Vec<super::jit::jitted::InputType> = dummies
+            let input_types: Vec<super::jit::jit::InputType> = dummies
                 .iter()
-                .map(super::jit::jitted::InputType::of)
+                .map(super::jit::jit::InputType::of)
                 .collect();
 
-            // Push closure's captured env (shared, O(1)) + new owned
-            // frame for the param Bindings.
-            image.push_env(&closure.env);
-            image.push_frame();
-            for (param, dummy) in closure.params.iter().zip(dummies.iter()) {
-                image.insert((**param).clone(), Rc::new(dummy.clone()));
-            }
-
-            // Snapshot the freshly-created param Bindings so we can hold
-            // them past the pop_frame() below.
-            let param_bindings: Vec<_> = closure
-                .params
-                .iter()
-                .map(|p| image.binding(p).expect("just inserted").clone())
-                .collect();
-
-            // Compile the body through the full JIT pipeline.
-            let mut seg = super::jit::ir::IRSegment::new();
-            let mut jit_scope = super::jit::scope::JitImage::new(image);
-            let cgen_result = seg.cgen(closure.body.clone(), &mut jit_scope);
-
-            // Pop frames (params + env) regardless of success — the
-            // saved `param_bindings` keep their inner RefCells alive.
-            image.pop_frame();
-            image.pop_frame();
-
-            cgen_result?;
-            let optimized = super::jit::optimize::optimize(seg);
-            let folded: super::jit::ir::IRSegment = optimized.into();
-            let mir: super::jit::ir2::MIRSegment = folded.into();
-            let mir2 = super::jit::optimize2::optimize2(mir);
-            let rir: super::jit::ir3::RIRSegment = mir2.into();
-            let lir = super::jit::regalloc::regalloc(rir);
-            let executor = super::jit::executor::JitExecutor::new(lir);
-
-            let jc = super::jit::jitted::JittedClosure {
-                params: closure.params.clone(),
-                param_bindings,
-                input_types,
-                env: Rc::clone(&closure.env),
-                executor: core::cell::RefCell::new(executor),
-            };
+            let jc = super::jit::jit::JittedClosure::compile(
+                &closure, &dummies, input_types, image,
+            )?;
             Ok(Value::JittedClosure(Rc::new(jc)))
         }
 

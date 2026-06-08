@@ -88,6 +88,12 @@ static mut SLOT_VALUES: *mut Vec<Option<Rc<Value>>> = core::ptr::null_mut();
 /// Per-call `LocalId → Binding` map. `BindLocal` inserts; `LoadLocal`
 /// / `StoreLocal` / `UnboxLocal` read/write through it. Grows lazily.
 static mut LOCALS: *mut Vec<Option<Binding>> = core::ptr::null_mut();
+/// Outermost running `JitExecutor`. Set once on the first (outermost)
+/// `run()` entry, cleared on its exit; **nested runs do NOT swap it**
+/// — that's the deliberate design choice to keep auto-JIT cache
+/// entries consolidated at the root rather than scattered across the
+/// call chain.
+static mut CURRENT_EXECUTOR: *mut JitExecutor = core::ptr::null_mut();
 /// Debug flag — when true, the next `JitExecutor::new()` dumps its LIR.
 pub static mut JIT_DUMP_NEXT: bool = false;
 
@@ -459,12 +465,100 @@ unsafe extern "C" fn h_cdr(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_escape(slot_id: u32) -> u32 {
     unsafe {
-        let v = reify_slot(slot_id);
-        match evaluate(Rc::new(v), image_ref()) {
+        let sexp = reify_slot(slot_id);
+
+        // Fast path: if the sexp is a cons-form `(symbol args...)`
+        // whose symbol resolves to a `Value::Closure`, try the auto-JIT
+        // cache on the outermost running executor. On any miss /
+        // failure we fall through to the existing interpreter path.
+        if let Some(slot) = try_autojit_call(&sexp) {
+            return slot;
+        }
+
+        match evaluate(Rc::new(sexp), image_ref()) {
             Ok(result) => intern_value(&result),
             Err(_) => 0,
         }
     }
+}
+
+/// If `sexp` is a `(symbol args...)` form whose head resolves to a
+/// `Value::Closure`, evaluate the args, look up (or compile) the
+/// callee in the outermost executor's cache, dispatch through the
+/// resulting `JittedClosure`, and return the result slot id. Returns
+/// `None` to signal "fall back to interpreter" for any reason
+/// (head isn't a symbol, doesn't resolve to a Closure, no executor
+/// available, type mismatch on a cached entry, etc.).
+unsafe fn try_autojit_call(sexp: &Value) -> Option<u32> {
+    let executor_ptr = unsafe { CURRENT_EXECUTOR };
+    if executor_ptr.is_null() {
+        return None;
+    }
+
+    let (head, _) = match sexp {
+        Value::Cons(car, cdr) => (car.clone(), cdr.clone()),
+        _ => return None,
+    };
+
+    // Head must be a symbol that resolves to a Closure.
+    let sym = match &*head {
+        Value::Symbol(s) => s.clone(),
+        _ => return None,
+    };
+    let image = unsafe { image_ref() };
+    let resolved = image.get(&sym)?;
+    let closure = match &*resolved {
+        Value::Closure(c) => c.clone(),
+        _ => return None,
+    };
+
+    // Evaluate the args in the current scope (same view the
+    // interpreter would use). Bail on any error.
+    let mut arg_vals: Vec<Value> = Vec::with_capacity(closure.params.len());
+    for i in 0..closure.params.len() {
+        if !sexp.nth_exists(i + 1) {
+            return None;
+        }
+        match evaluate(sexp.nth(i + 1), image) {
+            Ok(v) => arg_vals.push(v),
+            Err(_) => return None,
+        }
+    }
+
+    let executor: &JitExecutor = unsafe { &*executor_ptr };
+    let jc = executor.get_or_compile_callee(&closure, &arg_vals, image)?;
+
+    // Dispatch: type-check (defense; should already pass), overwrite
+    // the pinned param Bindings, push captured env + a param frame on
+    // the Image (so any nested Escape inside the inner body sees the
+    // right scope), run the inner executor, pop frames, intern the
+    // result.
+    for (i, val) in arg_vals.iter().enumerate() {
+        if !jc.input_types[i].accepts(val) {
+            return None;
+        }
+    }
+    for (i, val) in arg_vals.into_iter().enumerate() {
+        *jc.param_bindings[i].borrow_mut() = Rc::new(val);
+    }
+
+    image.push_env(&jc.env);
+    let mut param_frame: alloc::collections::BTreeMap<_, _> =
+        alloc::collections::BTreeMap::new();
+    for (param, binding) in jc.params.iter().zip(jc.param_bindings.iter()) {
+        param_frame.insert((**param).clone(), binding.clone());
+    }
+    image.push_env(&Rc::new(param_frame));
+
+    let result = jc.executor.borrow_mut().run(image);
+
+    image.pop_frame();
+    image.pop_frame();
+
+    Some(match result {
+        Ok(v) => intern_value(&v),
+        Err(_) => 0,
+    })
 }
 
 unsafe extern "C" fn h_hits(slot_id: u32) -> u32 {
@@ -672,6 +766,25 @@ pub(crate) struct JitExecutor {
     locals_storage: Vec<Option<Binding>>,
     /// Byte offset of the entry point in `code` (always 0 for now).
     entry_offset: usize,
+    /// Auto-JIT cache. Populated lazily when a JIT body Escapes a call
+    /// whose head resolves to a `Value::Closure` — we compile that
+    /// callee specialized to its actual arg types, stash the
+    /// `JittedClosure` here, and dispatch through it.
+    ///
+    /// Lives on the **outermost** running `JitExecutor` only; nested
+    /// runs leave `CURRENT_EXECUTOR` untouched so the cache
+    /// consolidates at the root. Dropping the root executor drops
+    /// every specialization it ever produced.
+    specializations: core::cell::RefCell<
+        alloc::collections::BTreeMap<super::jit::CalleeKey, super::jit::CalleeEntry>,
+    >,
+    /// Recursion guard. A nested auto-JIT request for a key already in
+    /// this set falls back to the interpreter for that one frame —
+    /// avoiding infinite-compile when a closure body Escapes a call
+    /// to itself.
+    currently_compiling: core::cell::RefCell<
+        alloc::collections::BTreeSet<super::jit::CalleeKey>,
+    >,
 }
 
 impl JitExecutor {
@@ -692,6 +805,85 @@ impl JitExecutor {
             slot_storage,
             locals_storage: Vec::with_capacity(64),
             entry_offset: 0,
+            specializations: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
+            currently_compiling: core::cell::RefCell::new(alloc::collections::BTreeSet::new()),
+        }
+    }
+
+    /// Look up — or compile — a `JittedClosure` for the given closure
+    /// at the given input types. Used by `h_escape`'s auto-JIT fast
+    /// path. Returns `None` (caller should fall back to interpreter)
+    /// on: cache miss for a `Failed` entry, recursion guard hit, tail-
+    /// self-call rejection, cgen error, or cache RefCell contention.
+    pub(crate) fn get_or_compile_callee(
+        &self,
+        closure: &crate::language::ast::Closure,
+        args: &[crate::language::ast::Value],
+        image: &mut Image,
+    ) -> Option<Rc<super::jit::JittedClosure>> {
+        let types: Vec<super::jit::InputType> = args
+            .iter()
+            .map(super::jit::InputType::of)
+            .collect();
+        let key = super::jit::CalleeKey::from(closure, types.clone());
+
+        // Cache hit path.
+        if let Ok(cache) = self.specializations.try_borrow() {
+            match cache.get(&key) {
+                Some(super::jit::CalleeEntry::Ready(rc)) => return Some(rc.clone()),
+                Some(super::jit::CalleeEntry::Failed) => return None,
+                None => {}
+            }
+        } else {
+            return None;
+        }
+
+        // Recursion guard.
+        if let Ok(mut compiling) = self.currently_compiling.try_borrow_mut() {
+            if !compiling.insert(key.clone()) {
+                return None;
+            }
+        } else {
+            return None;
+        }
+
+        // Tail-self-call pre-scan: preserve the interpreter's TCO by
+        // refusing to auto-JIT closures whose body would lose it.
+        if super::jit::has_tail_self_call(closure) {
+            if let Ok(mut cache) = self.specializations.try_borrow_mut() {
+                cache.insert(key.clone(), super::jit::CalleeEntry::Failed);
+            }
+            if let Ok(mut compiling) = self.currently_compiling.try_borrow_mut() {
+                compiling.remove(&key);
+            }
+            return None;
+        }
+
+        let result = super::jit::JittedClosure::compile(
+            closure,
+            args,
+            types,
+            image,
+        );
+
+        if let Ok(mut compiling) = self.currently_compiling.try_borrow_mut() {
+            compiling.remove(&key);
+        }
+
+        match result {
+            Ok(jc) => {
+                let rc = Rc::new(jc);
+                if let Ok(mut cache) = self.specializations.try_borrow_mut() {
+                    cache.insert(key, super::jit::CalleeEntry::Ready(rc.clone()));
+                }
+                Some(rc)
+            }
+            Err(_) => {
+                if let Ok(mut cache) = self.specializations.try_borrow_mut() {
+                    cache.insert(key, super::jit::CalleeEntry::Failed);
+                }
+                None
+            }
         }
     }
 
@@ -722,6 +914,11 @@ impl JitExecutor {
         let saved_values = unsafe { SLOT_VALUES };
         let saved_locals = unsafe { LOCALS };
 
+        // Only the outermost `run()` sets `CURRENT_EXECUTOR`; nested
+        // runs leave it alone so all auto-JIT cache writes land at the
+        // root. `first_entry` tracks whether we're the outermost.
+        let first_entry = unsafe { CURRENT_EXECUTOR.is_null() };
+
         unsafe {
             IMAGE = image as *mut Image;
             SLOTS_BASE = self.slot_storage.as_mut_ptr();
@@ -729,6 +926,9 @@ impl JitExecutor {
             SLOT_BUMP = 1; // slot 0 reserved for nil
             SLOT_VALUES = &mut self.slot_value_storage as *mut _;
             LOCALS = &mut self.locals_storage as *mut _;
+            if first_entry {
+                CURRENT_EXECUTOR = self as *mut JitExecutor;
+            }
         }
 
         // Cache-coherency dance before jumping into freshly-written
@@ -783,6 +983,9 @@ impl JitExecutor {
             SLOT_BUMP = saved_bump;
             SLOT_VALUES = saved_values;
             LOCALS = saved_locals;
+            if first_entry {
+                CURRENT_EXECUTOR = core::ptr::null_mut();
+            }
         }
 
         Ok(result)

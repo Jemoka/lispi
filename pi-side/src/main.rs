@@ -224,6 +224,82 @@ fn main() {
         }
     }
 
+    // ===== auto-descending JIT =====
+    // The outer jitted body Escapes the inner call `(mul-by-self x)`.
+    // Auto-JIT in h_escape's fast path should compile `mul-by-self`
+    // on the first call and cache it on the outermost executor; the
+    // second call to `(wrap 5)` should reuse the cached compilation
+    // rather than recompiling.
+    {
+        use language::{evaluate, parse, Image};
+        let mut img = Image::new();
+        let setup = parse("(begin
+            (defun mul-by-self (x) (mul x x))
+            (set wrap (jit (lambda (x) (mul-by-self x)) 1))
+            (wrap 5))").unwrap();
+        let observed = match evaluate(setup.into(), &mut img) {
+            Ok(v) => format!("{}", v),
+            Err(e) => format!("ERR: {}", e),
+        };
+        if observed == "25" {
+            println!("[auto-jit-basic] PASS  ({})", observed);
+            passed += 1;
+        } else {
+            println!("[auto-jit-basic] FAIL  got={:?} (expected 25)", observed);
+            failed += 1;
+        }
+    }
+
+    // ===== auto-JIT with a body that recursively calls itself =====
+    // First call compiles `count-down`; the recursive Escape hits the
+    // currently_compiling guard and falls back to interpreter for that
+    // one frame. Once the outer compilation completes the cache holds
+    // an entry for `count-down`, so subsequent recursive frames reach
+    // the cache and dispatch via JIT.
+    {
+        use language::{evaluate, parse, Image};
+        let mut img = Image::new();
+        let setup = parse("(begin
+            (defun count-down (n acc)
+                (if (eq n 0) acc (count-down (sub n 1) (add acc 1))))
+            (set jcd (jit (lambda (n) (count-down n 0)) 1))
+            (jcd 5))").unwrap();
+        let observed = match evaluate(setup.into(), &mut img) {
+            Ok(v) => format!("{}", v),
+            Err(e) => format!("ERR: {}", e),
+        };
+        if observed == "5" {
+            println!("[auto-jit-recursive] PASS  ({})", observed);
+            passed += 1;
+        } else {
+            println!("[auto-jit-recursive] FAIL  got={:?} (expected 5)", observed);
+            failed += 1;
+        }
+    }
+
+    // ===== auto-JIT type-specialization cache =====
+    // Same callee invoked with two different InputType tuples should
+    // produce two cache entries that compute the right value each.
+    {
+        use language::{evaluate, parse, Image};
+        let mut img = Image::new();
+        let setup = parse("(begin
+            (defun sq (x) (mul x x))
+            (set jw (jit (lambda (x) (sq x)) 1))
+            (add (jw 4) (jw 7)))").unwrap();
+        let observed = match evaluate(setup.into(), &mut img) {
+            Ok(v) => format!("{}", v),
+            Err(e) => format!("ERR: {}", e),
+        };
+        if observed == "65" {
+            println!("[auto-jit-type-cache] PASS  ({})", observed);
+            passed += 1;
+        } else {
+            println!("[auto-jit-type-cache] FAIL  got={:?} (expected 65)", observed);
+            failed += 1;
+        }
+    }
+
     // ===== jit-calls-jit (via Escape) =====
     // A jitted body calls another jitted closure by symbol. The cgen
     // sees an unrecognized cons-form `(jsq x)`, escapes the entire

@@ -60,8 +60,8 @@ pub enum Value {
     TailCall(Closure, Vec<Rc<Value>>),
     /// A closure whose body has been JIT-compiled. The eval/exec path
     /// in `execute.rs` recognises this and dispatches to the compiled
-    /// artifact (see `jit::jitted::JittedClosure`).
-    JittedClosure(Rc<super::jit::jitted::JittedClosure>),
+    /// artifact (see `jit::jit::JittedClosure`).
+    JittedClosure(Rc<super::jit::jit::JittedClosure>),
 }
 
 impl Value {
