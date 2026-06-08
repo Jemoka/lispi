@@ -75,7 +75,8 @@ pub(super) fn eval(
         | Value::Macro(_)
         | Value::Special(_)
         | Value::Syscall(_)
-        | Value::Array(_) => Ok((*sexp).clone()),
+        | Value::Array(_)
+        | Value::JittedClosure(_) => Ok((*sexp).clone()),
 
         // TailCall should never appear in source — only as trampoline tokens
         Value::TailCall(_, _) => Ok((*sexp).clone()),
@@ -132,6 +133,57 @@ fn exec(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'stati
         }
         Value::Special(s) => execute_special(s.clone(), sexp, image, tail),
         Value::Syscall(s) => execute_syscall(s.clone(), sexp, image),
+        Value::JittedClosure(jc) => {
+            // Evaluate args in caller scope (never tail — the JIT body
+            // is one straight-line trip, no interpreter trampoline).
+            let arg_vals: Vec<Value> = jc
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, _)| evaluate(sexp.nth(i + 1), image))
+                .collect::<Result<_, _>>()?;
+
+            // Type guard — the JIT body is specialized; refuse args
+            // that don't match the compile-time dummy types.
+            for (i, val) in arg_vals.iter().enumerate() {
+                if !jc.input_types[i].accepts(val) {
+                    return Err(
+                        "jitted-closure: argument type mismatch — recompile (jit ...) with the new types.",
+                    );
+                }
+            }
+
+            // Overwrite the pinned param Bindings in place. The JIT-
+            // emitted code holds raw pointers to these RefCell cells;
+            // mutating them through borrow_mut() is what makes the new
+            // args visible to the compiled body.
+            for (i, val) in arg_vals.into_iter().enumerate() {
+                *jc.param_bindings[i].borrow_mut() = Rc::new(val);
+            }
+
+            // Make the closure's captures + params visible to the
+            // interpreter while the JIT runs — if the compiled body
+            // `Escape`s back to the interpreter (e.g. to dispatch a
+            // call to another `JittedClosure`), name lookups need to
+            // resolve to the same Bindings the JIT used.
+            //   1) Push the closure's captured env as a shared frame.
+            //   2) Push a NEW shared frame that maps each param name
+            //      to its pinned Binding (so name lookups find them).
+            image.push_env(&jc.env);
+            let mut param_frame: alloc::collections::BTreeMap<_, _> =
+                alloc::collections::BTreeMap::new();
+            for (param, binding) in jc.params.iter().zip(jc.param_bindings.iter()) {
+                param_frame.insert((**param).clone(), binding.clone());
+            }
+            image.push_env(&Rc::new(param_frame));
+
+            let result = jc.executor.borrow_mut().run(image);
+
+            image.pop_frame();
+            image.pop_frame();
+
+            result
+        }
         _ => Err("Cannot execute: head is not callable."),
     }
 }

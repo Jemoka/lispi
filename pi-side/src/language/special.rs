@@ -81,6 +81,15 @@ pub enum Special {
     /// Chaitin-Briggs allocation, phi destruction, physical registers
     /// throughout. Returns nil.
     Ir4,
+    /// `(jitexec <sexp>)` — full pipeline through LIR plus
+    /// emission + execution. Returns the value the JIT'd code
+    /// computed, equivalent to the interpreter's `(eval <sexp>)`.
+    JitExec,
+    /// `(jit <closure-expr> <dummy1> <dummy2> ...)` — JIT-compile a
+    /// closure's body, specialized to the dummies' types. Returns a
+    /// `Value::JittedClosure` that can be called like a regular
+    /// closure; the interpreter dispatches to the compiled body.
+    Jit,
 }
 
 impl Special {
@@ -248,6 +257,12 @@ impl Special {
         }
         if name.eq_ignore_ascii_case("ir4") {
             return Some(Self::Ir4);
+        }
+        if name.eq_ignore_ascii_case("jitexec") {
+            return Some(Self::JitExec);
+        }
+        if name.eq_ignore_ascii_case("jit") {
+            return Some(Self::Jit);
         }
         None
     }
@@ -710,6 +725,122 @@ pub fn execute_special(
             let rir: super::jit::ir3::RIRSegment = mir2.into();
             println!("{:?}", rir);
             Ok(Value::Nil)
+        }
+
+        // `(jit closure-expr dummy1 dummy2 ...)` — compile the closure's
+        // body to LIR + machine code, specialized to the dummies' types.
+        // Returns a `Value::JittedClosure` callable via the interpreter
+        // (see `execute.rs`).
+        //
+        // How it works:
+        //   1. Evaluate the closure (RHS) and each dummy.
+        //   2. Push the closure's captured env + a fresh owned frame.
+        //   3. Insert each param=dummy into the owned frame — this
+        //      creates the `Binding` cells the JIT will bake pointers
+        //      into via `LoadCapture`.
+        //   4. Snapshot those `Binding`s (clones bump the Rc) so they
+        //      survive the frame pop.
+        //   5. Run the JIT pipeline on the closure body.
+        //   6. Pop the frames; the snapshotted Bindings keep their
+        //      `RefCell` allocation alive. Whenever the resulting
+        //      `JittedClosure` is later called, those same `RefCell`s
+        //      get rewritten in place with the actual args — the JIT's
+        //      baked pointers stay valid, no recompile needed.
+        Special::Jit => {
+            if !sexp.nth_exists(1) {
+                return Err("jit: expected closure and dummy arguments.");
+            }
+            let closure_expr = sexp.nth(1);
+            let closure_val = evaluate(closure_expr, image)?;
+            let closure = match closure_val {
+                Value::Closure(c) => c,
+                _ => return Err("jit: first argument must be a closure."),
+            };
+
+            // Evaluate exactly arity-many dummy args.
+            let mut dummies: Vec<Value> = Vec::with_capacity(closure.params.len());
+            for i in 0..closure.params.len() {
+                if !sexp.nth_exists(i + 2) {
+                    return Err("jit: not enough dummy inputs for closure arity.");
+                }
+                dummies.push(evaluate(sexp.nth(i + 2), image)?);
+            }
+            if sexp.nth_exists(closure.params.len() + 2) {
+                return Err("jit: too many dummy inputs for closure arity.");
+            }
+
+            let input_types: Vec<super::jit::jitted::InputType> = dummies
+                .iter()
+                .map(super::jit::jitted::InputType::of)
+                .collect();
+
+            // Push closure's captured env (shared, O(1)) + new owned
+            // frame for the param Bindings.
+            image.push_env(&closure.env);
+            image.push_frame();
+            for (param, dummy) in closure.params.iter().zip(dummies.iter()) {
+                image.insert((**param).clone(), Rc::new(dummy.clone()));
+            }
+
+            // Snapshot the freshly-created param Bindings so we can hold
+            // them past the pop_frame() below.
+            let param_bindings: Vec<_> = closure
+                .params
+                .iter()
+                .map(|p| image.binding(p).expect("just inserted").clone())
+                .collect();
+
+            // Compile the body through the full JIT pipeline.
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            let cgen_result = seg.cgen(closure.body.clone(), &mut jit_scope);
+
+            // Pop frames (params + env) regardless of success — the
+            // saved `param_bindings` keep their inner RefCells alive.
+            image.pop_frame();
+            image.pop_frame();
+
+            cgen_result?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            let rir: super::jit::ir3::RIRSegment = mir2.into();
+            let lir = super::jit::regalloc::regalloc(rir);
+            let executor = super::jit::executor::JitExecutor::new(lir);
+
+            let jc = super::jit::jitted::JittedClosure {
+                params: closure.params.clone(),
+                param_bindings,
+                input_types,
+                env: Rc::clone(&closure.env),
+                executor: core::cell::RefCell::new(executor),
+            };
+            Ok(Value::JittedClosure(Rc::new(jc)))
+        }
+
+        // `(jitexec <sexp>)` — full pipeline through LIR plus
+        // emission + execution. Returns the value the JIT'd code
+        // computed (equivalent to `(eval <sexp>)`).
+        Special::JitExec => {
+            if !sexp.nth_exists(1) {
+                return Err("jitexec: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("jitexec: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            let rir: super::jit::ir3::RIRSegment = mir2.into();
+            let lir = super::jit::regalloc::regalloc(rir);
+            let mut executor = super::jit::executor::JitExecutor::new(lir);
+            executor.run(image)
         }
 
         // `(ir4 <sexp>)` — full pipeline through LIR (post-regalloc).

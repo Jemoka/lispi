@@ -351,7 +351,8 @@ impl IRSegment {
                 | Value::Macro(_)
                 | Value::Special(_)
                 | Value::Syscall(_)
-                | Value::Array(_) => {
+                | Value::Array(_)
+                | Value::JittedClosure(_) => {
                     let r = self.reg();
                     self.emit(IRStatement::Load(r.clone(), (*sexp).clone()));
                     Ok(r)
@@ -369,7 +370,11 @@ impl IRSegment {
                         self.emit(IRStatement::LoadCapture(r.clone(), b));
                     }
                     Resolution::Unbound => {
-                        return Err("undefined symbol during IR generation");
+                        // Symbol unbound at IR-gen time — could be a
+                        // top-level set! creating it later in the same
+                        // expression. Escape to the interpreter, which
+                        // resolves it at runtime.
+                        return Ok(self.escape(&sexp));
                     }
                 }
                 Ok(r)

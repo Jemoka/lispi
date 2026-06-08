@@ -128,6 +128,32 @@ pub(crate) fn sub(rd: Register, rn: Register, rm: Register) -> u32 {
     dp_reg(COND_AL, OP_SUB, false, rd, rn, rm)
 }
 
+/// `add rd, rn, rm, lsl #shift` — register form with an immediate
+/// shift in the operand2 field. Format (A5-8):
+///   cond(31:28) 000(27:25) opcode(24:21) S(20) Rn(19:16) Rd(15:12)
+///   shift_imm(11:7) shift_type(6:5) 0(4) Rm(3:0)
+pub(crate) fn add_lsl_imm(rd: Register, rn_reg: Register, rm: Register, shift_imm5: u32) -> u32 {
+    debug_assert!(shift_imm5 < 32);
+    (COND_AL << 28)
+        | (OP_ADD << 21)
+        | (rn(rn_reg) << 16)
+        | (rn(rd) << 12)
+        | (shift_imm5 << 7)
+        | (SHIFT_LSL << 5)
+        | rn(rm)
+}
+
+/// `mov rd, rm, lsl #shift`.
+pub(crate) fn mov_lsl_imm(rd: Register, rm: Register, shift_imm5: u32) -> u32 {
+    debug_assert!(shift_imm5 < 32);
+    (COND_AL << 28)
+        | (OP_MOV << 21)
+        | (rn(rd) << 12)
+        | (shift_imm5 << 7)
+        | (SHIFT_LSL << 5)
+        | rn(rm)
+}
+
 pub(crate) fn orr(rd: Register, rn: Register, rm: Register) -> u32 {
     dp_reg(COND_AL, OP_ORR, false, rd, rn, rm)
 }
@@ -418,6 +444,17 @@ pub(crate) fn bx(rm: Register) -> u32 {
         | (0b0001_0010 << 20)
         | (0xFFF << 8)
         | (0b0001 << 4)
+        | rn(rm)
+}
+
+// BLX <Rm>: like BX but also writes (next-instr-addr) to LR — a true
+// register-indirect call. Encoding (A4-16):
+//   cond(31:28) 0001 0010(27:20) (1111 1111 1111)(19:8) 0011(7:4) Rm(3:0)
+pub(crate) fn blx(rm: Register) -> u32 {
+    (COND_AL << 28)
+        | (0b0001_0010 << 20)
+        | (0xFFF << 8)
+        | (0b0011 << 4)
         | rn(rm)
 }
 

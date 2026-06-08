@@ -360,7 +360,13 @@ fn lower_stmt(stmt: &RIRStatement, out: &mut Vec<Pseudo>) {
             out.push(I::BindLocal);
         }
         R::BindImmediate { name, id, src } => {
+            // Lower as: r0=imm payload → bl box_number (r0 ← slot_id)
+            //        → r1=local_id, r2=&name → bl bind_local.
+            // The Box helper turns the raw immediate into a fresh
+            // shadow slot so bind_local receives a slot id like
+            // every other BindLocal site.
             out.push(I::MovImm(p(Register::R0), *src));
+            out.push(I::Box);
             out.push(I::MovId(p(Register::R1), *id));
             out.push(I::LdrNamePtr(p(Register::R2), name.clone()));
             out.push(I::BindLocal);
@@ -448,14 +454,35 @@ fn lower_stmt(stmt: &RIRStatement, out: &mut Vec<Pseudo>) {
         R::SysStopMonitor(d)  => { out.push(I::StopMonitor);  out.push(I::Mov(v(d), p(Register::R0))); }
 
         R::SysGet32(d, addr)     => out.push(I::LdrOffset(v(d), v(addr), 0)),
-        R::SysUartPut8(d, byte_) => call!(UartPut8; args=[byte_]; dst=d),
-        R::SysDelay(d, cnt)      => call!(Delay; args=[cnt]; dst=d),
+        R::SysUartPut8(d, byte_) => {
+            out.push(I::Mov(p(Register::R0), v(byte_)));
+            out.push(I::UartPut8);
+            out.push(I::LdrValuePtr(v(d), Value::Nil));
+        }
+        R::SysDelay(d, cnt) => {
+            out.push(I::Mov(p(Register::R0), v(cnt)));
+            out.push(I::Delay);
+            out.push(I::LdrValuePtr(v(d), Value::Nil));
+        }
         R::SysPut32(d, addr, val) => {
             out.push(I::StrOffset(v(val), v(addr), 0));
             out.push(I::LdrValuePtr(v(d), Value::Nil));
         }
-        R::SysZero32(d, a, b, c)    => call!(Zero32; args=[a, b, c]; dst=d),
-        R::SysFull32(d, a, b, c, e) => call!(Full32; args=[a, b, c, e]; dst=d),
+        R::SysZero32(d, a, b, c) => {
+            out.push(I::Mov(p(Register::R0), v(a)));
+            out.push(I::Mov(p(Register::R1), v(b)));
+            out.push(I::Mov(p(Register::R2), v(c)));
+            out.push(I::Zero32);
+            out.push(I::LdrValuePtr(v(d), Value::Nil));
+        }
+        R::SysFull32(d, a, b, c, e) => {
+            out.push(I::Mov(p(Register::R0), v(a)));
+            out.push(I::Mov(p(Register::R1), v(b)));
+            out.push(I::Mov(p(Register::R2), v(c)));
+            out.push(I::Mov(p(Register::R3), v(e)));
+            out.push(I::Full32);
+            out.push(I::LdrValuePtr(v(d), Value::Nil));
+        }
 
         R::Escape(d, s) => call!(Escape; args=[s]; dst=d),
     }

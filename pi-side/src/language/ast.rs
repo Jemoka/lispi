@@ -58,6 +58,10 @@ pub enum Value {
     Array(Rc<RefCell<Vec<u32>>>),
     /// Internal: tail-call trampoline token. Never escapes call_closure.
     TailCall(Closure, Vec<Rc<Value>>),
+    /// A closure whose body has been JIT-compiled. The eval/exec path
+    /// in `execute.rs` recognises this and dispatches to the compiled
+    /// artifact (see `jit::jitted::JittedClosure`).
+    JittedClosure(Rc<super::jit::jitted::JittedClosure>),
 }
 
 impl Value {
@@ -131,6 +135,7 @@ impl fmt::Display for Value {
             Value::Symbol(s) => write!(f, "{}", s.as_str()),
             Value::Special(s) => write!(f, "<special:{:?}>", s),
             Value::Closure(_) => write!(f, "<closure>"),
+            Value::JittedClosure(jc) => write!(f, "<jitted-closure: arity={}>", jc.params.len()),
             Value::Macro(_) => write!(f, "<macro>"),
             Value::Syscall(s) => write!(f, "<syscall:{:?}>", s),
             Value::Array(a) => write!(f, "<array:{}>", a.borrow().len()),

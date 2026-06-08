@@ -297,7 +297,7 @@ impl EnrichedMIRSegment {
             }
             BindImmediate { id, src, .. } => {
                 let st = match src {
-                    Value::Closure(_) | Value::Macro(_) => SCCPState::Bottom,
+                    Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => SCCPState::Bottom,
                     _ => SCCPState::Constant(src.clone()),
                 };
                 self.update_local(*id, st, local_uses);
@@ -347,7 +347,7 @@ impl EnrichedMIRSegment {
         }
         if let LoadValuePtr(d, v) = s {
             let st = match v {
-                Value::Closure(_) | Value::Macro(_) => Bottom,
+                Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => Bottom,
                 _ => Constant(v.clone()),
             };
             return Some((d.0, st));
@@ -536,7 +536,7 @@ impl EnrichedMIRSegment {
             // within each or-pattern.
 
             // heap-dst opaque
-            LoadCapture(d, _) | Array(d, _) | Unpack(d, _)
+            LoadCapture(d, _) | Array(d, _) | Unpack(d, _) | GetIdx(d, _, _)
                 => Some((d.0, Bottom)),
             Full(d, _, _) => Some((d.0, Bottom)),
             PutIdx(d, _, _, _) | ReadIdx(d, _, _, _) | FillIdx(d, _, _, _)
@@ -544,7 +544,7 @@ impl EnrichedMIRSegment {
             FullIdx(d, _, _, _, _) => Some((d.0, Bottom)),
 
             // imm-dst opaque
-            GetIdx(d, _, _) | Hits(d, _)
+            Hits(d, _)
                 => Some((d.0, Bottom)),
 
             SysDsb(d) | SysPrefetchFlush(d) | SysUartInit(d) | SysUartGet8(d)
@@ -891,8 +891,10 @@ fn dst_reg(s: &MIRStatement) -> Option<(u32, bool)> {
         | Lshift(d, _, _) | Rshift(d, _, _)
         | BinOr(d, _, _) | BinAnd(d, _, _) | Xor(d, _, _)
         | Eq(d, _, _) | Gt(d, _, _) | Lt(d, _, _) | Gte(d, _, _) | Lte(d, _, _)
-        | GetIdx(d, _, _) | SysPut32(d, _, _)
+        | SysPut32(d, _, _)
             => Some((d.0, true)),
+
+        GetIdx(d, _, _) => Some((d.0, true)),
 
         SysZero32(d, _, _, _) | SysFull32(d, _, _, _, _)
             => Some((d.0, true)),

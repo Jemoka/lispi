@@ -130,7 +130,7 @@ pub(crate) enum MIRStatement {
     Full(HeapReg, HeapReg, HeapReg),
     Unpack(HeapReg, HeapReg),
     /// u32 result fits in `ImmReg` (harmonized vs raw IR).
-    GetIdx(ImmReg, HeapReg, HeapReg),
+    GetIdx(HeapReg, HeapReg, HeapReg),
     PutIdx(HeapReg, HeapReg, HeapReg, HeapReg),
     ReadIdx(HeapReg, HeapReg, HeapReg, HeapReg),
     FillIdx(HeapReg, HeapReg, HeapReg, HeapReg),
@@ -226,7 +226,7 @@ fn classify_dst(stmt: &IRStatement, kinds: &mut BTreeMap<VReg, Kind>) {
         | LogNot(d, _) | Xor(d, _, _)
         | Eq(d, _, _) | Gt(d, _, _) | Lt(d, _, _) | Gte(d, _, _) | Lte(d, _, _)
         | AsAddr(d, _) | AsSigned(d, _) | AsUnsigned(d, _)
-        | Nullp(d, _) | GetIdx(d, _, _) | Hits(d, _)
+        | Nullp(d, _) | Hits(d, _)
         | SysDsb(d) | SysPrefetchFlush(d) | SysUartInit(d) | SysUartGet8(d)
         | SysClearMonitor(d) | SysGetMonitor(d) | SysStopMonitor(d)
         | SysGet32(d, _) | SysUartPut8(d, _) | SysDelay(d, _)
@@ -239,7 +239,7 @@ fn classify_dst(stmt: &IRStatement, kinds: &mut BTreeMap<VReg, Kind>) {
         // Put/Read/Fill/FullIdx/Escape — all heap-typed.
         LoadLocal(d, _) | LoadCapture(d, _)
         | Cons(d, _, _) | Car(d, _) | Cdr(d, _)
-        | Array(d, _) | Full(d, _, _) | Unpack(d, _)
+        | Array(d, _) | Full(d, _, _) | Unpack(d, _) | GetIdx(d, _, _)
         | PutIdx(d, _, _, _) | ReadIdx(d, _, _, _) | FillIdx(d, _, _, _)
         | FullIdx(d, _, _, _, _)
         | Escape(d, _)
@@ -488,7 +488,7 @@ fn lower_stmt(
         I::GetIdx(d, a, b) => {
             let ra = ctx.use_heap(a, out);
             let rb = ctx.use_heap(b, out);
-            out.push(M::GetIdx(ImmReg(d.0), ra, rb));
+            out.push(M::GetIdx(HeapReg(d.0), ra, rb));
         }
         I::PutIdx(d, t, i, v) => {
             let rt = ctx.use_heap(t, out);
@@ -704,7 +704,7 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &MIRStatement) -> fmt::Result {
         MIRStatement::Full(r,a,b) => bin_h(f, "full", r, a, b),
         MIRStatement::Unpack(r,a) => uno_h(f, "unpk", r, a),
         MIRStatement::GetIdx(r,a,b) => {
-            mn!("gidx")?; fmt_imm(f, r)?; write!(f, ", ")?;
+            mn!("gidx")?; fmt_heap(f, r)?; write!(f, ", ")?;
             fmt_heap(f, a)?; write!(f, ", ")?; fmt_heap(f, b)
         }
         MIRStatement::PutIdx(r,t,i,v) => tri_h(f, "pidx", r, t, i, v),

@@ -8,3 +8,5 @@ pub mod ir3;
 pub mod ir4;
 pub mod regalloc;
 pub mod encodings;
+pub mod executor;
+pub mod jitted;

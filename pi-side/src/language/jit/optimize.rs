@@ -353,7 +353,7 @@ impl EnrichedIRSegment {
                 // Inline-Value bind — Closures/Macros stay opaque, mirror
                 // `eval`'s rule for `Load`.
                 let st = match src {
-                    Value::Closure(_) | Value::Macro(_) => SCCPState::Bottom,
+                    Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => SCCPState::Bottom,
                     _ => SCCPState::Constant(src.clone()),
                 };
                 self.update_local(*id, st, local_uses);
@@ -397,7 +397,7 @@ impl EnrichedIRSegment {
         // `Load`: literal propagation. Closures/Macros opaque → Bottom.
         if let Load(d, v) = s {
             let st = match v {
-                Value::Closure(_) | Value::Macro(_) => Bottom,
+                Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => Bottom,
                 _ => Constant(v.clone()),
             };
             return Some((d.clone(), st));
