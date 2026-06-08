@@ -1,10 +1,11 @@
 //! Special form definitions and implementations for the LISP interpreter.
 
 use alloc::rc::Rc;
+use alloc::string::String as AllocString;
 use alloc::vec::Vec;
 
 use core::cell::Cell;
-use crate::println;
+use core::fmt::Write as _;
 use super::ast::{Closure, Macro, Symbol, Value};
 use super::environment::Image;
 use super::execute::{eval, evaluate};
@@ -266,6 +267,20 @@ impl Special {
         }
         None
     }
+}
+
+/// Format a JIT-pipeline artifact with `Debug` into an `AllocString`.
+/// Used by the `(ir ...)` / `(oir ...)` / `(ir2 ...)` / `(oir2 ...)` /
+/// `(ir3 ...)` / `(ir4 ...)` debug specials so the IR dump returns as
+/// the form's value (via `Value::String`) instead of being `println!`'d
+/// to UART — the REPL framer can't interleave loose prints with its
+/// request/response framing.
+fn dump_to_string<T: core::fmt::Debug>(seg: &T) -> AllocString {
+    let mut s = AllocString::new();
+    // `write!` on `String` is infallible; the `Result` is the
+    // `core::fmt::Write` contract.
+    let _ = write!(&mut s, "{:?}", seg);
+    s
 }
 
 /// Extract and evaluate two numeric arguments from sexp (special left right).
@@ -680,8 +695,7 @@ pub fn execute_special(
             let mut seg = super::jit::ir::IRSegment::new();
             let mut jit_scope = super::jit::scope::JitImage::new(image);
             seg.cgen(arg, &mut jit_scope)?;
-            println!("{:?}", seg);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&seg)))
         }
 
         // `(oir <sexp>)` — like (ir) but with SCCP + folding applied
@@ -700,8 +714,7 @@ pub fn execute_special(
             seg.cgen(arg, &mut jit_scope)?;
             let optimized = super::jit::optimize::optimize(seg);
             let folded: super::jit::ir::IRSegment = optimized.into();
-            println!("{:?}", folded);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&folded)))
         }
 
         // `(ir3 <sexp>)` — full pipeline through RIR: cgen → optimize
@@ -723,8 +736,7 @@ pub fn execute_special(
             let mir: super::jit::ir2::MIRSegment = folded.into();
             let mir2 = super::jit::optimize2::optimize2(mir);
             let rir: super::jit::ir3::RIRSegment = mir2.into();
-            println!("{:?}", rir);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&rir)))
         }
 
         // `(jit closure-expr dummy1 dummy2 ...)` — compile the closure's
@@ -822,8 +834,7 @@ pub fn execute_special(
             let mir2 = super::jit::optimize2::optimize2(mir);
             let rir: super::jit::ir3::RIRSegment = mir2.into();
             let lir = super::jit::regalloc::regalloc(rir);
-            println!("{:?}", lir);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&lir)))
         }
 
         // `(oir2 <sexp>)` — full pipeline through MIR + the second
@@ -843,8 +854,7 @@ pub fn execute_special(
             let folded: super::jit::ir::IRSegment = optimized.into();
             let mir: super::jit::ir2::MIRSegment = folded.into();
             let mir2 = super::jit::optimize2::optimize2(mir);
-            println!("{:?}", mir2);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&mir2)))
         }
 
         // `(ir2 <sexp>)` — full pipeline: cgen → optimize → MIR lowering
@@ -864,8 +874,7 @@ pub fn execute_special(
             let optimized = super::jit::optimize::optimize(seg);
             let folded: super::jit::ir::IRSegment = optimized.into();
             let mir: super::jit::ir2::MIRSegment = folded.into();
-            println!("{:?}", mir);
-            Ok(Value::Nil)
+            Ok(Value::String(dump_to_string(&mir)))
         }
 
         // `(hits f)` — return the hit count of a closure or macro.
