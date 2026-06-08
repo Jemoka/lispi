@@ -6,6 +6,7 @@ pub mod number;
 pub mod parse;
 pub mod special;
 pub mod syscalls;
+pub mod jit;
 
 pub use environment::Image;
 pub use execute::evaluate;

@@ -88,10 +88,18 @@ impl Image {
     }
 
     /// Look up the current value of `name`, searching top-to-bottom.
+    /// If the resolved value is a Closure, bump its hit counter — used
+    /// for hot-path tracking (e.g. JIT compilation candidates).
     pub fn get(&self, name: &str) -> Option<Rc<ast::Value>> {
         for frame in self.frames.iter().rev() {
             if let Some(binding) = frame.get(name) {
-                return Some(binding.borrow().clone());
+                let val = binding.borrow().clone();
+                match &*val {
+                    ast::Value::Closure(c) => c.hits.set(c.hits.get() + 1),
+                    ast::Value::Macro(m) => m.closure.hits.set(m.closure.hits.get() + 1),
+                    _ => {}
+                }
+                return Some(val);
             }
         }
         None
@@ -103,6 +111,31 @@ impl Image {
         for frame in self.frames.iter().rev() {
             if let Some(binding) = frame.get(name) {
                 return Some(binding);
+            }
+        }
+        None
+    }
+
+    /// Resolve `name` to its binding slot for JIT-time codegen.
+    ///
+    /// Returns the `Binding` (cloned `Rc`) so the caller can keep the
+    /// `RefCell` allocation alive, plus a raw pointer to the inner
+    /// `Rc<ast::Value>` word — emitted code bakes this address in as
+    /// an immediate and uses `ldr`/`str` against it directly.
+    ///
+    /// SAFETY contract for callers: the returned pointer is valid only
+    /// while the returned `Binding` is held. Drop the `Binding` and the
+    /// pointer may dangle. Concurrent `set!` during a helper call that
+    /// holds a `*const Value` derived from this slot can drop the old
+    /// value out from under the helper — the JIT enforces that no
+    /// `set!` runs mid-expression.
+    #[allow(dead_code)]
+    pub fn addr(&self, name: &str) -> Option<(Binding, *mut Rc<ast::Value>)> {
+        for frame in self.frames.iter().rev() {
+            if let Some(binding) = frame.get(name) {
+                let b: Binding = Rc::clone(binding);
+                let slot: *mut Rc<ast::Value> = b.as_ref().as_ptr();
+                return Some((b, slot));
             }
         }
         None

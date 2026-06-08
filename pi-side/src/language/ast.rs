@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
 use heapless::String;
+use core::cell::Cell;
 
 use super::constants::SYMB_NAME_LEN;
 use super::environment;
@@ -33,6 +34,7 @@ pub struct Closure {
     pub params: Vec<Rc<Symbol>>,
     pub body: Rc<Value>,
     pub env: Rc<environment::Environment>,
+    pub hits: Rc<Cell<u64>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

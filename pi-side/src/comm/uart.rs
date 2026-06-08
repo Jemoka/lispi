@@ -37,9 +37,10 @@ pub fn init() {
         memory::put32(AUX_MU_MCR_REG, 0);
         // 8-bit mode
         memory::put32(AUX_MU_LCR_REG, 0b11);
-        // 115200 baud: baudrate = system_clock / (8 * (reg + 1))
-        // 250MHz / (8 * 271) = ~115200
-        memory::put32(AUX_MU_BAUD, 270);
+        // baudrate = system_clock / (8 * (reg + 1))  =>  reg = sys_clk/(8*baud) - 1
+        const SYS_CLK: u32 = 250_000_000;
+        let baud_reg = SYS_CLK / (8 * shared::BAUD_RATE) - 1;
+        memory::put32(AUX_MU_BAUD, baud_reg);
         // enable tx and rx
         memory::put32(AUX_MU_CNTL_REG, 0b11);
         dmb();

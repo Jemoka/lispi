@@ -3,6 +3,8 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
+use core::cell::Cell;
+use crate::println;
 use super::ast::{Closure, Macro, Symbol, Value};
 use super::environment::Image;
 use super::execute::{eval, evaluate};
@@ -57,6 +59,28 @@ pub enum Special {
     Quasiquote,
     Unquote,
     UnquoteSplicing,
+    Hits,
+    /// `(ir <sexp>)` — run `<sexp>` through the JIT IR generator and
+    /// print the resulting IRSegment. Returns nil.
+    Ir,
+    /// `(oir <sexp>)` — like `(ir)` but runs the SCCP optimization
+    /// pass over the segment before printing. Returns nil.
+    Oir,
+    /// `(ir2 <sexp>)` — full pipeline: cgen → optimize → MIR lowering
+    /// (typed Imm/Heap registers with cast insertion), then prints the
+    /// resulting `MIRSegment`. Returns nil.
+    Ir2,
+    /// `(oir2 <sexp>)` — like `(ir2)` plus the MIR-level peephole +
+    /// SCCP/DCE optimization pass. Returns nil.
+    Oir2,
+    /// `(ir3 <sexp>)` — full pipeline through RIR: cgen → optimize →
+    /// MIR → optimize2 → RIR (single-namespace registers with asm-
+    /// lowering hints in opcode comments). Returns nil.
+    Ir3,
+    /// `(ir4 <sexp>)` — full pipeline through LIR (post-regalloc):
+    /// Chaitin-Briggs allocation, phi destruction, physical registers
+    /// throughout. Returns nil.
+    Ir4,
 }
 
 impl Special {
@@ -203,6 +227,27 @@ impl Special {
         }
         if name.eq_ignore_ascii_case("unquote-splicing") {
             return Some(Self::UnquoteSplicing);
+        }
+        if name.eq_ignore_ascii_case("hits") {
+            return Some(Self::Hits);
+        }
+        if name.eq_ignore_ascii_case("ir") {
+            return Some(Self::Ir);
+        }
+        if name.eq_ignore_ascii_case("oir") {
+            return Some(Self::Oir);
+        }
+        if name.eq_ignore_ascii_case("ir2") {
+            return Some(Self::Ir2);
+        }
+        if name.eq_ignore_ascii_case("oir2") {
+            return Some(Self::Oir2);
+        }
+        if name.eq_ignore_ascii_case("ir3") {
+            return Some(Self::Ir3);
+        }
+        if name.eq_ignore_ascii_case("ir4") {
+            return Some(Self::Ir4);
         }
         None
     }
@@ -606,6 +651,144 @@ pub fn execute_special(
         Special::Unquote => Err("unquote: not inside a quasiquote."),
         Special::UnquoteSplicing => Err("unquote-splicing: not inside a quasiquote."),
 
+        // `(ir <sexp>)` — run sexp through the JIT IR generator and
+        // print the resulting segment. Useful for debugging cgen.
+        // Returns nil.
+        Special::Ir => {
+            if !sexp.nth_exists(1) {
+                return Err("ir: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("ir: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            println!("{:?}", seg);
+            Ok(Value::Nil)
+        }
+
+        // `(oir <sexp>)` — like (ir) but with SCCP + folding applied
+        // before printing. Strips the enriched segment back to a plain
+        // IRSegment so we reuse the existing pretty-printer.
+        Special::Oir => {
+            if !sexp.nth_exists(1) {
+                return Err("oir: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("oir: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            println!("{:?}", folded);
+            Ok(Value::Nil)
+        }
+
+        // `(ir3 <sexp>)` — full pipeline through RIR: cgen → optimize
+        // → MIR → optimize2 → RIR. RIR has a single VReg namespace and
+        // asm-lowering doc comments per opcode.
+        Special::Ir3 => {
+            if !sexp.nth_exists(1) {
+                return Err("ir3: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("ir3: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            let rir: super::jit::ir3::RIRSegment = mir2.into();
+            println!("{:?}", rir);
+            Ok(Value::Nil)
+        }
+
+        // `(ir4 <sexp>)` — full pipeline through LIR (post-regalloc).
+        // Runs cgen → optimize → ir2 → optimize2 → ir3 → regalloc.
+        Special::Ir4 => {
+            if !sexp.nth_exists(1) {
+                return Err("ir4: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("ir4: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            let rir: super::jit::ir3::RIRSegment = mir2.into();
+            let lir = super::jit::regalloc::regalloc(rir);
+            println!("{:?}", lir);
+            Ok(Value::Nil)
+        }
+
+        // `(oir2 <sexp>)` — full pipeline through MIR + the second
+        // optimizer pass (peephole + SCCP + DCE on MIR).
+        Special::Oir2 => {
+            if !sexp.nth_exists(1) {
+                return Err("oir2: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("oir2: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            println!("{:?}", mir2);
+            Ok(Value::Nil)
+        }
+
+        // `(ir2 <sexp>)` — full pipeline: cgen → optimize → MIR lowering
+        // (typed Imm/Heap reg split with auto cast emission). Prints the
+        // resulting `MIRSegment`.
+        Special::Ir2 => {
+            if !sexp.nth_exists(1) {
+                return Err("ir2: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("ir2: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            println!("{:?}", mir);
+            Ok(Value::Nil)
+        }
+
+        // `(hits f)` — return the hit count of a closure or macro.
+        // Note: looking up the symbol itself bumps the count by one.
+        Special::Hits => {
+            let val = extract_unary(sexp, image)?;
+            let count = match &val {
+                Value::Closure(c) => c.hits.get(),
+                Value::Macro(m) => m.closure.hits.get(),
+                _ => return Err("hits: argument must be a closure or macro."),
+            };
+            Ok(Value::Number(Number::Unsigned(count as u32)))
+        }
+
         // --- binding / closures ---
 
         // `lambda`: create a closure that captures the current environment.
@@ -628,6 +811,7 @@ pub fn execute_special(
                 params,
                 body,
                 env: image.snapshot(),
+                hits: Rc::new(Cell::new(0u64)),
             }))
         }
 
@@ -875,6 +1059,7 @@ pub fn execute_special(
                 params: params.clone(),
                 body,
                 env: image.snapshot(),
+                hits: Rc::new(Cell::new(0u64)),
             };
 
             let mac = Value::Macro(Macro { params, closure });

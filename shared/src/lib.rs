@@ -37,7 +37,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-pub const BAUD_RATE: u32 = 115200;
+pub const BAUD_RATE: u32 = 230400;
 
 /// Number of sync words to send before a frame.
 pub const SYNC_COUNT: u32 = 8;

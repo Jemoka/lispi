@@ -1,0 +1,44 @@
+;;;; helpers ;;
+
+(defmacro chicken (a b)
+  `(+ ,(car a) ,b))
+
+(chicken (8 2) 3)
+
+(defun nth (n l)
+  (if (eq n 0)
+      (car l)
+    (nth (- n 1) (cdr l))))
+(defun map (f l)
+  (if (nullp l)
+      nil
+    (cons (f (car l)) (map f (cdr l)))))
+(defun reduce (f acc l)
+  (if (nullp l)
+      acc
+    (reduce f (f acc (car l)) (cdr l))))
+(defun filter (f l)
+  (if (nullp l)
+      nil
+    (if (f (car l))
+        (cons (car l) (filter f (cdr l)))
+      (filter f (cdr l)))))
+(defun while (cond body)
+  (if (cond)
+      (begin
+       body
+       (while cond body))
+    nil))
+(defun identity (x) x)
+(defun repeat (n val)
+  (if (eq n 0) nil
+    (cons val (repeat (- n 1) val))))
+(defun append (a b)
+  (if (nullp a) b
+    (cons (car a) (append (cdr a) b))))
+
+
+(append '(1 2 3 4 5) '(1 2 3 4 5))
+
+(hits append)
+
