@@ -5,10 +5,10 @@ use std::thread;
 use std::time::Duration;
 
 const TTY_PREFIXES: &[&str] = &[
-    "ttyUSB",      // linux
-    "ttyACM",      // linux
+    // "ttyUSB",      // linux
+    // "ttyACM",      // linux
     "cu.SLAB_USB", // mac os
-    "cu.usbserial", // mac os
+    // "cu.usbserial", // mac os
 ];
 
 /// Find a /dev/ttyUSB* (or equivalent) device.
@@ -84,6 +84,7 @@ fn set_8n1(fd: RawFd, speed: u32) {
 
     let baud = match speed {
         115200 => B115200,
+        230400 => B230400,
         9600 => B9600,
         57600 => B57600,
         38400 => B38400,
