@@ -24,7 +24,6 @@
 #![allow(dead_code)]
 
 use alloc::rc::Rc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -88,6 +87,25 @@ static mut SLOT_VALUES: *mut Vec<Option<Rc<Value>>> = core::ptr::null_mut();
 /// Per-call `LocalId → Binding` map. `BindLocal` inserts; `LoadLocal`
 /// / `StoreLocal` / `UnboxLocal` read/write through it. Grows lazily.
 static mut LOCALS: *mut Vec<Option<Binding>> = core::ptr::null_mut();
+
+/// Persistent backing storage for the slot/value/locals tables.
+/// Allocated once on the first outermost `run()` call and reused for
+/// every subsequent call (nested or not). Each `run()` carves out its
+/// own range by saving `SLOT_BUMP` (and the value/locals Vec lengths)
+/// on entry, allocating above that mark, and restoring on exit. This
+/// avoids the multi-hundred-megabyte allocator churn that a per-call
+/// fresh `Vec<ShadowSlot>` of `SLOT_CAPACITY` entries would cause for
+/// recursion-heavy programs like fib.
+static mut SLOT_BACKING:       Option<Vec<ShadowSlot>>          = None;
+static mut SLOT_VALUE_BACKING: Option<Vec<Option<Rc<Value>>>>   = None;
+static mut LOCALS_BACKING:     Option<Vec<Option<Binding>>>     = None;
+/// Global save/restore stack for param-binding `Rc<Value>` snapshots
+/// taken around each `JittedClosure` dispatch. Using a static-mut Vec
+/// instead of a per-JC `RefCell<Vec<_>>` skips the borrow-counter
+/// check on the hot path. Safe under single-threaded runtime + the
+/// strict push/pop discipline in `try_autojit_call` / `execute.rs`.
+static mut BINDING_SNAPSHOT_STACK: Vec<Rc<Value>> = Vec::new();
+
 /// Outermost running `JitExecutor`. Set once on the first (outermost)
 /// `run()` entry, cleared on its exit; **nested runs do NOT swap it**
 /// — that's the deliberate design choice to keep auto-JIT cache
@@ -337,9 +355,14 @@ unsafe extern "C" fn h_store_capture(binding_ptr: *mut RefCell<Rc<Value>>, slot_
 
 unsafe extern "C" fn h_load_capture_slot(binding_ptr: *const RefCell<Rc<Value>>) -> u32 {
     unsafe {
-        let cell_ref = (*binding_ptr).borrow();
-        let v: Value = (**cell_ref).clone();
-        intern_value(&v)
+        // Skip RefCell's borrow-counter check (we know we have unique
+        // access — JIT helpers run synchronously). Read the inner
+        // Rc<Value> and pass `&Value` straight to `intern_value` so
+        // imm-typed values (Integer/Unsigned/Addr/Bool/Nil) never pay
+        // for an outer Value clone.
+        let rc_ptr = (*binding_ptr).as_ptr();
+        let v_ref: &Value = &**rc_ptr;
+        intern_value(v_ref)
     }
 }
 
@@ -347,12 +370,64 @@ unsafe extern "C" fn h_load_capture_slot(binding_ptr: *const RefCell<Rc<Value>>)
 /// `LdrValuePtr`) into a fresh shadow slot. Used so the JIT can keep
 /// the convention "heap regs hold slot ids", even for opcodes whose
 /// IR-level form is "load the address of this Value literal."
+///
+/// **Hot path**: literal-pool entries have stable addresses, so the
+/// same Cons sexp is interned on every recursive call to the same
+/// JIT body. Cache `(literal_ptr → slot_id)` in a reserved zone below
+/// the bump-stack so the slot id never gets clobbered by inner
+/// frames.
 unsafe extern "C" fn h_intern_value_ptr(value_ptr: *const Value) -> u32 {
     unsafe {
-        let v: Value = (*value_ptr).clone();
-        intern_value(&v)
+        let key = value_ptr as usize;
+        let cache = &mut *core::ptr::addr_of_mut!(LITERAL_SLOT_CACHE);
+        for &(k, slot) in cache.iter() {
+            if k == key { return slot; }
+        }
+        // Cache miss: assign a fresh literal-zone slot id and intern
+        // the value into it. Reserved zone is `1 .. LITERAL_ZONE_LEN`;
+        // overflow falls back to the bump-stack via `intern_value`.
+        let v_ref: &Value = &*value_ptr;
+        let slot = if (cache.len() + 1) < LITERAL_ZONE_LEN as usize {
+            let id = (cache.len() + 1) as u32;
+            let sv = slot_values();
+            sv.push(Some(Rc::new(v_ref.clone())));
+            let src_idx = sv.len() as u32 - 1;
+            let s = slot_at(id);
+            (*s).tag = match v_ref {
+                Value::Nil => TAG_NIL,
+                Value::Bool(_) => TAG_BOOL,
+                Value::Number(Number::Integer(_)) => TAG_INT,
+                Value::Number(Number::Unsigned(_)) => TAG_UNSIGNED,
+                Value::Number(Number::Addr(_)) => TAG_ADDR,
+                _ => TAG_EXTERN,
+            };
+            (*s).payload = match v_ref {
+                Value::Bool(b) => if *b { 1 } else { 0 },
+                Value::Number(Number::Integer(i)) => *i as u32,
+                Value::Number(Number::Unsigned(u)) => *u,
+                Value::Number(Number::Addr(a)) => *a as u32,
+                _ => 0,
+            };
+            (*s).extra = 0;
+            (*s).src = src_idx;
+            id
+        } else {
+            intern_value(v_ref)
+        };
+        cache.push((key, slot));
+        slot
     }
 }
+
+/// Number of shadow slots reserved at the bottom of the slot table
+/// for `h_intern_value_ptr`'s literal cache. Sized for typical JIT
+/// bodies — fib has ~3 unique literals; larger bodies may have more.
+const LITERAL_ZONE_LEN: u32 = 128;
+
+/// Cache of `(literal Value ptr → slot id)`. Cleared at outermost
+/// `run()` entry; slot ids are in `1 .. LITERAL_ZONE_LEN` (the
+/// reserved zone, untouched by the bump-stack).
+static mut LITERAL_SLOT_CACHE: Vec<(usize, u32)> = Vec::new();
 
 unsafe extern "C" fn h_cons(car_slot: u32, cdr_slot: u32) -> u32 {
     unsafe {
@@ -465,13 +540,33 @@ unsafe extern "C" fn h_cdr(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_escape(slot_id: u32) -> u32 {
     unsafe {
-        let sexp = reify_slot(slot_id);
+        // **Hottest fast path**: literal-pool sexp slots stash a
+        // per-callsite cache of "what JittedClosure did we dispatch
+        // to last time?" into the slot's `extra` field. Skip symbol
+        // lookup, type derivation, BTreeMap cache lookup entirely.
+        let s = &*slot_at(slot_id);
+        let cached_idx = s.extra;
+        if cached_idx != 0 {
+            let cache = &*core::ptr::addr_of!(DISPATCH_CACHE_VEC);
+            if let Some(jc_slot) = cache.get((cached_idx - 1) as usize) {
+                if let Some(jc) = jc_slot {
+                    let sexp = reify_slot(slot_id);
+                    if let Some(res) = dispatch_cached(&sexp, jc) {
+                        return res;
+                    }
+                }
+            }
+        }
 
-        // Fast path: if the sexp is a cons-form `(symbol args...)`
-        // whose symbol resolves to a `Value::Closure`, try the auto-JIT
-        // cache on the outermost running executor. On any miss /
-        // failure we fall through to the existing interpreter path.
-        if let Some(slot) = try_autojit_call(&sexp) {
+        let sexp = reify_slot(slot_id);
+        if let Some((slot, jc_rc)) = try_autojit_call_returning_jc(&sexp) {
+            // Populate the per-slot dispatch cache for next time.
+            let cache_idx = {
+                let vec = &mut *core::ptr::addr_of_mut!(DISPATCH_CACHE_VEC);
+                vec.push(Some(jc_rc));
+                vec.len() as u32 // 1-indexed (0 = unset)
+            };
+            (*slot_at(slot_id)).extra = cache_idx;
             return slot;
         }
 
@@ -480,6 +575,98 @@ unsafe extern "C" fn h_escape(slot_id: u32) -> u32 {
             Err(_) => 0,
         }
     }
+}
+
+/// Side table of `JittedClosure` Rcs keyed by 1-indexed entries
+/// stashed in the `extra` field of literal-zone shadow slots. This
+/// avoids the per-call symbol lookup + BTreeMap walk for already-
+/// dispatched callsites.
+static mut DISPATCH_CACHE_VEC: Vec<Option<Rc<super::jit::JittedClosure>>> = Vec::new();
+
+
+/// Dispatch through an already-resolved `JittedClosure` — eval args,
+/// snapshot bindings, run, restore. Same as the body of
+/// `try_autojit_call`'s success branch but with the resolve work
+/// already done. Returns `None` to signal "fall back to interp" only
+/// if arg eval / type check fails.
+unsafe fn dispatch_cached(sexp: &Value, jc: &Rc<super::jit::JittedClosure>) -> Option<u32> {
+    let image = image_ref();
+    let arity = jc.params.len();
+    // Snapshot + write inline for the common arity-1 case (fib), Vec
+    // for >1. For arity 1 we avoid the arg_vals Vec entirely.
+    if arity == 1 {
+        let v = evaluate(sexp.nth(1), image).ok()?;
+        if !jc.input_types[0].accepts(&v) { return None; }
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        let saved = (*jc.param_bindings[0].as_ptr()).clone();
+        snap_stack.push(saved);
+        *jc.param_bindings[0].as_ptr() = Rc::new(v);
+        image.push_env(&jc.env);
+        image.push_env(&jc.param_env);
+        let result = jc.executor.run(image);
+        image.pop_frame();
+        image.pop_frame();
+        let restored = snap_stack.pop().unwrap();
+        *jc.param_bindings[0].as_ptr() = restored;
+        return Some(match result { Ok(v) => intern_value(&v), Err(_) => 0 });
+    }
+    // Generic arity path.
+    let mut arg_vals: Vec<Value> = Vec::with_capacity(arity);
+    for i in 0..arity {
+        if !sexp.nth_exists(i + 1) { return None; }
+        arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
+    }
+    for (i, v) in arg_vals.iter().enumerate() {
+        if !jc.input_types[i].accepts(v) { return None; }
+    }
+    let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+    for b in &jc.param_bindings {
+        let cur = (*b.as_ptr()).clone();
+        snap_stack.push(cur);
+    }
+    for (i, val) in arg_vals.into_iter().enumerate() {
+        *jc.param_bindings[i].as_ptr() = Rc::new(val);
+    }
+    image.push_env(&jc.env);
+    image.push_env(&jc.param_env);
+    let result = jc.executor.run(image);
+    image.pop_frame();
+    image.pop_frame();
+    for i in (0..jc.param_bindings.len()).rev() {
+        let saved = snap_stack.pop().unwrap();
+        *jc.param_bindings[i].as_ptr() = saved;
+    }
+    Some(match result { Ok(v) => intern_value(&v), Err(_) => 0 })
+}
+
+/// Like `try_autojit_call` but on success also returns the resolved
+/// `JittedClosure` so `h_escape` can stash it in the per-slot cache.
+unsafe fn try_autojit_call_returning_jc(sexp: &Value) -> Option<(u32, Rc<super::jit::JittedClosure>)> {
+    let executor_ptr = CURRENT_EXECUTOR;
+    if executor_ptr.is_null() { return None; }
+    let (head, _) = match sexp {
+        Value::Cons(car, cdr) => (car.clone(), cdr.clone()),
+        _ => return None,
+    };
+    let sym = match &*head {
+        Value::Symbol(s) => s.clone(),
+        _ => return None,
+    };
+    let image = image_ref();
+    let resolved = image.get(&sym)?;
+    let closure = match &*resolved {
+        Value::Closure(c) => c.clone(),
+        _ => return None,
+    };
+    let mut arg_vals: Vec<Value> = Vec::with_capacity(closure.params.len());
+    for i in 0..closure.params.len() {
+        if !sexp.nth_exists(i + 1) { return None; }
+        arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
+    }
+    let executor: &JitExecutor = &*executor_ptr;
+    let jc = executor.get_or_compile_callee(&closure, &arg_vals, image)?;
+    let slot = dispatch_cached(sexp, &jc)?;
+    Some((slot, jc))
 }
 
 /// If `sexp` is a `(symbol args...)` form whose head resolves to a
@@ -538,22 +725,34 @@ unsafe fn try_autojit_call(sexp: &Value) -> Option<u32> {
             return None;
         }
     }
+    // Save current values on the *global* snapshot stack — skips
+    // RefCell borrow-counter checks on the hot recursive path. Push
+    // here, pop after `run` returns. The stack discipline + single-
+    // threaded runtime keep this safe.
+    let snap_stack = unsafe { &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK) };
+    for b in &jc.param_bindings {
+        let cur = unsafe { (*b.as_ptr()).clone() };
+        snap_stack.push(cur);
+    }
     for (i, val) in arg_vals.into_iter().enumerate() {
-        *jc.param_bindings[i].borrow_mut() = Rc::new(val);
+        unsafe { *jc.param_bindings[i].as_ptr() = Rc::new(val); }
     }
 
+    // Push the closure's captured env + the pre-built param frame
+    // (both are just `Rc::clone` — no per-call BTreeMap construction).
     image.push_env(&jc.env);
-    let mut param_frame: alloc::collections::BTreeMap<_, _> =
-        alloc::collections::BTreeMap::new();
-    for (param, binding) in jc.params.iter().zip(jc.param_bindings.iter()) {
-        param_frame.insert((**param).clone(), binding.clone());
+    image.push_env(&jc.param_env);
+
+    let result = jc.executor.run(image);
+
+    image.pop_frame();
+    image.pop_frame();
+
+    // Pop the saved values back into the param Bindings.
+    for i in (0..jc.param_bindings.len()).rev() {
+        let saved = snap_stack.pop().unwrap();
+        unsafe { *jc.param_bindings[i].as_ptr() = saved; }
     }
-    image.push_env(&Rc::new(param_frame));
-
-    let result = jc.executor.borrow_mut().run(image);
-
-    image.pop_frame();
-    image.pop_frame();
 
     Some(match result {
         Ok(v) => intern_value(&v),
@@ -758,12 +957,6 @@ pub(crate) struct JitExecutor {
     value_literals: Vec<Rc<Value>>,
     /// Pinned Name (Symbol) literals.
     name_literals: Vec<Rc<Name>>,
-    /// Backing storage for `slot_values()`.
-    slot_value_storage: Vec<Option<Rc<Value>>>,
-    /// Backing storage for the shadow-slot table.
-    slot_storage: Vec<ShadowSlot>,
-    /// Backing storage for the LocalId → Binding side table.
-    locals_storage: Vec<Option<Binding>>,
     /// Byte offset of the entry point in `code` (always 0 for now).
     entry_offset: usize,
     /// Auto-JIT cache. Populated lazily when a JIT body Escapes a call
@@ -790,20 +983,11 @@ pub(crate) struct JitExecutor {
 impl JitExecutor {
     pub(crate) fn new(seg: LIRSegment) -> Self {
         let (code, captures, value_literals, name_literals) = emit_segment(&seg);
-
-        let slot_storage = vec![
-            ShadowSlot { tag: TAG_NIL, payload: 0, extra: 0, src: 0 };
-            SLOT_CAPACITY
-        ];
-
         JitExecutor {
             code,
             captures,
             value_literals,
             name_literals,
-            slot_value_storage: Vec::with_capacity(64),
-            slot_storage,
-            locals_storage: Vec::with_capacity(64),
             entry_offset: 0,
             specializations: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
             currently_compiling: core::cell::RefCell::new(alloc::collections::BTreeSet::new()),
@@ -825,7 +1009,10 @@ impl JitExecutor {
             .iter()
             .map(super::jit::InputType::of)
             .collect();
-        let key = super::jit::CalleeKey::from(closure, types.clone());
+        // Build the key with `types` moved in — no clone. On the
+        // hot cache-hit path that's the only allocation we'd be
+        // paying for, so eliminating it matters.
+        let key = super::jit::CalleeKey::from(closure, types);
 
         // Cache hit path.
         if let Ok(cache) = self.specializations.try_borrow() {
@@ -862,7 +1049,7 @@ impl JitExecutor {
         let result = super::jit::JittedClosure::compile(
             closure,
             args,
-            types,
+            key.types.clone(),
             image,
         );
 
@@ -900,35 +1087,73 @@ impl JitExecutor {
         crate::println!("--- end dump ---");
     }
 
-    pub(crate) fn run(&mut self, image: &mut Image) -> Result<Value, &'static str> {
-        // Re-entrancy support. A JIT body that Escapes back into the
-        // interpreter can ultimately reach another `JitExecutor::run()`
-        // (e.g. when one jitted closure calls another). Each
-        // executor's globals (slot table, locals side-table, …) are
-        // private to its single call, so we save the previous values
-        // on entry and restore them on exit.
+    pub(crate) fn run(&self, image: &mut Image) -> Result<Value, &'static str> {
+        // We share one persistent set of backing buffers across every
+        // `run()` call and let each frame carve out its own "stack
+        // frame" in slot space by saving and restoring `SLOT_BUMP`
+        // (and the value/locals Vec lengths). This avoids per-call
+        // 64KB allocation, which was making recursion-heavy programs
+        // like fib catastrophically slow.
+
         let saved_image  = unsafe { IMAGE };
         let saved_base   = unsafe { SLOTS_BASE };
         let saved_len    = unsafe { SLOTS_LEN };
         let saved_bump   = unsafe { SLOT_BUMP };
         let saved_values = unsafe { SLOT_VALUES };
         let saved_locals = unsafe { LOCALS };
+        // For nested calls, save the Vec lengths too so we can roll
+        // back to them on exit (releasing this frame's allocations
+        // without freeing the underlying allocation).
+        let saved_values_len: usize = unsafe {
+            if SLOT_VALUES.is_null() { 0 } else { (*SLOT_VALUES).len() }
+        };
+        let saved_locals_len: usize = unsafe {
+            if LOCALS.is_null() { 0 } else { (*LOCALS).len() }
+        };
 
-        // Only the outermost `run()` sets `CURRENT_EXECUTOR`; nested
-        // runs leave it alone so all auto-JIT cache writes land at the
-        // root. `first_entry` tracks whether we're the outermost.
         let first_entry = unsafe { CURRENT_EXECUTOR.is_null() };
 
+        // On the outermost call, allocate the backing buffers if we
+        // haven't yet (one-time cost), then point the globals at
+        // them. Nested calls leave the global pointers alone —
+        // they're already pointing at the same shared buffer.
         unsafe {
-            IMAGE = image as *mut Image;
-            SLOTS_BASE = self.slot_storage.as_mut_ptr();
-            SLOTS_LEN = self.slot_storage.len();
-            SLOT_BUMP = 1; // slot 0 reserved for nil
-            SLOT_VALUES = &mut self.slot_value_storage as *mut _;
-            LOCALS = &mut self.locals_storage as *mut _;
             if first_entry {
-                CURRENT_EXECUTOR = self as *mut JitExecutor;
+                // Use raw-pointer accesses to mutable statics to
+                // sidestep the Rust 2024 `static_mut_refs` lint while
+                // staying single-threaded-safe (the whole runtime is
+                // single-threaded by construction).
+                let s_ptr  = core::ptr::addr_of_mut!(SLOT_BACKING);
+                let sv_ptr = core::ptr::addr_of_mut!(SLOT_VALUE_BACKING);
+                let l_ptr  = core::ptr::addr_of_mut!(LOCALS_BACKING);
+                if (*s_ptr).is_none() {
+                    *s_ptr = Some(alloc::vec![
+                        ShadowSlot { tag: TAG_NIL, payload: 0, extra: 0, src: 0 };
+                        SLOT_CAPACITY
+                    ]);
+                }
+                if (*sv_ptr).is_none() {
+                    *sv_ptr = Some(alloc::vec::Vec::with_capacity(64));
+                }
+                if (*l_ptr).is_none() {
+                    *l_ptr = Some(alloc::vec::Vec::with_capacity(64));
+                }
+                let s_back = (*s_ptr).as_mut().unwrap();
+                SLOTS_BASE = s_back.as_mut_ptr();
+                SLOTS_LEN = s_back.len();
+                (*core::ptr::addr_of_mut!(LITERAL_SLOT_CACHE)).clear();
+                (*core::ptr::addr_of_mut!(DISPATCH_CACHE_VEC)).clear();
+                (*sv_ptr).as_mut().unwrap().clear();
+                SLOT_BUMP = LITERAL_ZONE_LEN; // bump-stack starts above the literal zone
+                SLOT_VALUES = (*sv_ptr).as_mut().unwrap() as *mut _;
+                LOCALS = (*l_ptr).as_mut().unwrap() as *mut _;
+                CURRENT_EXECUTOR = self as *const JitExecutor as *mut JitExecutor;
             }
+            // For nested calls: SLOT_BUMP/SLOT_VALUES/LOCALS keep the
+            // outer's high-water mark. Our new allocations naturally
+            // land above it. On exit we restore via saved_bump etc.,
+            // which logically "frees" everything we touched.
+            IMAGE = image as *mut Image;
         }
 
         // Cache-coherency dance before jumping into freshly-written
@@ -943,20 +1168,14 @@ impl JitExecutor {
         // The "test, clean, invalidate D-cache" loop (c7, c14, 3) is
         // the ARMv6 idiom — it returns with Z=0 while dirty lines
         // remain.
-        unsafe {
-            // ARM1176-specific cache coherency dance: clean+invalidate
-            // the entire D-cache (single-shot, not a loop), DSB, then
-            // invalidate the I-cache and flush the prefetch buffer.
-            core::arch::asm!(
-                "mcr p15, 0, {z}, c7, c14, 0",  // Clean+Invalidate D-cache
-                "mcr p15, 0, {z}, c7, c10, 4",  // DSB
-                "mcr p15, 0, {z}, c7, c5, 0",   // Invalidate I-cache
-                "mcr p15, 0, {z}, c7, c10, 4",  // DSB
-                "mcr p15, 0, {z}, c7, c5, 4",   // Prefetch flush (ISB)
-                z = in(reg) 0u32,
-                options(nostack, preserves_flags),
-            );
-        }
+        // JIT-emitted code is write-once: each `JitExecutor` writes
+        // its instructions in `new()` and never modifies them. With
+        // the I-cache enabled at boot, the first fetch of a fresh
+        // code buffer is a cold miss (the I-cache has never seen it)
+        // so it pulls clean instructions from DRAM. Subsequent runs
+        // of the same executor execute straight out of the I-cache.
+        // No per-run flush needed → skips 5 MCRs per call (saves a
+        // measurable chunk on tight recursion like fib).
 
         let code_ptr = self.code.as_ptr();
         let entry_addr = unsafe { code_ptr.add(self.entry_offset / 4) };
@@ -971,12 +1190,15 @@ impl JitExecutor {
             Value::Nil
         };
 
-        // Tear down our locals/slot-value storage, then restore the
-        // previous globals so the enclosing JIT call (if any) resumes
-        // with its own state.
+        // Roll the locals Vec back to its pre-call length. Do NOT
+        // truncate `slot_values` — the literal-slot cache holds
+        // `src` indices into it that must remain valid for the whole
+        // outermost call. It's cleared at the next outermost entry.
+        let _ = saved_values_len;
         unsafe {
-            self.slot_value_storage.clear();
-            self.locals_storage.clear();
+            if !LOCALS.is_null() {
+                (*LOCALS).truncate(saved_locals_len);
+            }
             IMAGE = saved_image;
             SLOTS_BASE = saved_base;
             SLOTS_LEN = saved_len;
@@ -1256,13 +1478,27 @@ fn build_save_mask(callee_saves_used: u32) -> u16 {
     m
 }
 
+/// Effective spill-area byte count, rounded so that the prologue
+/// leaves SP 8-byte aligned (AAPCS — needed for every `bl`/`blx` we
+/// emit). `mask`'s popcount = words pushed; combined with
+/// `spill_slots` it must be even for SP to stay 8-aligned. On real
+/// ARM1176, helpers compiled by Rust assume 8-aligned SP and will
+/// silently corrupt their stack frame otherwise; qemu doesn't catch
+/// this, which is how the bug slipped past the emulator tests.
+fn aligned_spill_bytes(spill_slots: u32, mask: u16) -> u32 {
+    let words_pushed = mask.count_ones();
+    let total = words_pushed + spill_slots;
+    let pad = total & 1; // 1 if odd, 0 if even
+    (spill_slots + pad) * 4
+}
+
 /// Number of machine words the prologue occupies. `push {regs}` is one
 /// word; `sub sp, sp, #imm` is one word if the immediate fits an
 /// 8-bit rotated literal, otherwise four (load_imm32 + sub).
-fn compute_prologue_size(spill_slots: u32, _mask: u16) -> usize {
+fn compute_prologue_size(spill_slots: u32, mask: u16) -> usize {
     let mut n = 1; // push
-    if spill_slots > 0 {
-        let bytes = spill_slots * 4;
+    let bytes = aligned_spill_bytes(spill_slots, mask);
+    if bytes > 0 {
         if bytes < 0x100 || encode_rotated_imm8(bytes).is_some() {
             n += 1;
         } else {
@@ -1274,8 +1510,9 @@ fn compute_prologue_size(spill_slots: u32, _mask: u16) -> usize {
 
 fn emit_prologue(e: &mut Emitter, spill_slots: u32, mask: u16) {
     e.push(push(mask));
-    if spill_slots > 0 {
-        let bytes = spill_slots * 4;
+    let bytes = aligned_spill_bytes(spill_slots, mask);
+    if bytes > 0 {
+        let _ = spill_slots;
         if bytes < 0x100 {
             e.push(sub_imm8(Register::SP, Register::SP, bytes));
         } else if let Some((imm8, rot4)) = encode_rotated_imm8(bytes) {
@@ -1441,7 +1678,7 @@ fn emit_segment(seg: &LIRSegment)
     // Epilogue pops the same set of registers we pushed, but with LR
     // swapped for PC (so the popped saved-LR value lands in PC — that
     // executes the return). NOT setting both — that would overcount.
-    e.spill_slots_bytes = seg.spill_slots * 4;
+    e.spill_slots_bytes = aligned_spill_bytes(seg.spill_slots, prologue_mask);
     e.epilogue_mask = (prologue_mask & !(1u16 << Register::LR.bit()))
         | (1u16 << Register::PC.bit());
 

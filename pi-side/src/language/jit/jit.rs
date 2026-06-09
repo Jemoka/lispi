@@ -31,6 +31,7 @@
 //! Both pointer fields are stable across `Closure::clone()` (which is
 //! field-wise `Rc::clone`).
 
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -125,7 +126,16 @@ pub struct JittedClosure {
     /// interpreter dispatch invoked via `Escape` from inside the
     /// compiled body resolves names the same way the JIT did.
     pub env: Rc<Environment>,
-    pub executor: RefCell<JitExecutor>,
+    /// Pre-built param-frame `Environment` — name → pinned `Binding`.
+    /// Constructed once at compile time and pushed via `image.push_env`
+    /// (O(1) `Rc::clone`) on every call. **Big win for recursion**:
+    /// avoids constructing a fresh `BTreeMap` + `Rc` per recursive
+    /// frame.
+    pub param_env: Rc<Environment>,
+    /// Owned compiled artifact. No `RefCell` needed: `JitExecutor::run`
+    /// takes `&self` and stores per-call mutable state on the local
+    /// stack — which is what makes recursive auto-JIT dispatch safe.
+    pub executor: JitExecutor,
 }
 
 impl fmt::Debug for JittedClosure {
@@ -195,12 +205,21 @@ impl JittedClosure {
         let lir = super::regalloc::regalloc(rir);
         let executor = JitExecutor::new(lir);
 
+        // Pre-build the param-frame Environment once: callers push it
+        // via `image.push_env(&jc.param_env)` (just an Rc::clone).
+        let mut param_env_map: BTreeMap<_, _> = BTreeMap::new();
+        for (param, binding) in closure.params.iter().zip(param_bindings.iter()) {
+            param_env_map.insert((**param).clone(), binding.clone());
+        }
+        let param_env = Rc::new(param_env_map);
+
         Ok(JittedClosure {
             params: closure.params.clone(),
             param_bindings,
             input_types,
             env: Rc::clone(&closure.env),
-            executor: RefCell::new(executor),
+            param_env,
+            executor,
         })
     }
 }

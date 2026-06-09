@@ -811,7 +811,7 @@ pub fn execute_special(
             let mir2 = super::jit::optimize2::optimize2(mir);
             let rir: super::jit::ir3::RIRSegment = mir2.into();
             let lir = super::jit::regalloc::regalloc(rir);
-            let mut executor = super::jit::executor::JitExecutor::new(lir);
+            let executor = super::jit::executor::JitExecutor::new(lir);
             executor.run(image)
         }
 

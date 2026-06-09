@@ -30,6 +30,18 @@ _start:
     mov r0, #0
     mcr p15, 0, r0, c7, c5, 4
 
+    // Invalidate I-cache and turn it on (SCTLR.I = bit 12). Real
+    // ARM1176 silicon: helpers compiled by Rust live in .text; with
+    // the I-cache enabled they execute from cache instead of slow
+    // DRAM, which is a big win for the JIT's many short helper bl
+    // calls. qemu honors this bit too.
+    mov r0, #0
+    mcr p15, 0, r0, c7, c5, 0      // invalidate entire I-cache
+    mrc p15, 0, r0, c1, c0, 0      // read SCTLR
+    orr r0, r0, #(1 << 12)         // set I bit
+    mcr p15, 0, r0, c1, c0, 0      // write SCTLR
+    mcr p15, 0, r0, c7, c5, 4      // prefetch flush
+
     // Clear the BSS (not very efficient; could be faster)
     mov r0, #0
     ldr r1, ={BSS_START}

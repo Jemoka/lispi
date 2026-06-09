@@ -200,12 +200,24 @@ Removes any existing lispi overlay at POS first."
   (setq lispi--overlays (delq ov lispi--overlays))
   (delete-overlay ov))
 
+(defun lispi--overlay-on-line ()
+  "Return a lispi result overlay on the current line, or nil.
+Scans `lispi--overlays' directly since `overlays-in' misses
+zero-width overlays sitting at line boundaries."
+  (let ((bol (line-beginning-position))
+        (eol (line-end-position)))
+    (seq-find (lambda (o)
+                (and (overlay-buffer o)
+                     (overlay-get o 'lispi-result)
+                     (<= bol (overlay-start o))
+                     (<= (overlay-start o) (1+ eol))))
+              lispi--overlays)))
+
 (defun lispi-toggle-fold-at-point ()
-  "Toggle fold/unfold of a multi-line result overlay at point."
+  "Toggle fold/unfold of a multi-line result overlay on the current line."
   (interactive)
-  (let ((ov (seq-find (lambda (o) (overlay-get o 'lispi-result))
-                      (overlays-at (point)))))
-    (unless ov (user-error "No lispi result overlay at point"))
+  (let ((ov (lispi--overlay-on-line)))
+    (unless ov (user-error "No lispi result overlay on this line"))
     (let* ((result (overlay-get ov 'lispi-full-result))
            (folded (overlay-get ov 'lispi-folded))
            (new-folded (not folded))

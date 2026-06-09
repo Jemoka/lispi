@@ -33,7 +33,46 @@
     (cons (car a) (append (cdr a) b))))
 
 
-;; (append '(1 2 3 4 5) '(1 2 3 4 5))
+;; (defun fib (n)
+;;   (if (or (eq n 0) (eq n 1))
+;;       n
+;;     (+ (fib (- n 1)) (fib (- n 2)))))
 
-;; (hits append)
 
+;; (ir fib)
+
+;; (+ 1 1)
+
+
+;; (set chicken (repeat 4096 3))
+;; (nth chicken 81)
+
+(defun fib (n)
+  (if (or (eq n 0) (eq n 1))
+      n
+    (+ (fib (- n 1)) (fib (- n 2)))))
+
+(set jf (jit fib 1))
+
+(begin
+ (@monitor/clear)
+ (let (a (car (@monitor/get)))
+   (begin 
+    (jf 19)
+    (- (car (@monitor/get)) a))))
+
+(begin
+    (@monitor/clear)
+    (let (a (car (@monitor/get)))
+      (begin 
+       (fib 19)
+       (- (car (@monitor/get)) a))))
+
+;; (@monitor/get)
+
+
+;; (fib 19)
+
+;; ;; (set jb (jit blend 3))
+;; ;; (jb 7)
+;; ;; (blend 7)

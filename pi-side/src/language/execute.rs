@@ -153,10 +153,18 @@ fn exec(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'stati
                 }
             }
 
-            // Overwrite the pinned param Bindings in place. The JIT-
-            // emitted code holds raw pointers to these RefCell cells;
-            // mutating them through borrow_mut() is what makes the new
-            // args visible to the compiled body.
+            // Save the current values of the pinned param Bindings,
+            // then overwrite with this call's args. Restoring at exit
+            // is what makes **recursion** work: each call sees its own
+            // n, and when the recursive frame returns, the caller's n
+            // is back where it left it. The JIT-emitted code holds raw
+            // pointers into these `RefCell`s (via `LoadCapture`); the
+            // RefCells themselves are pointer-stable across writes.
+            let saved_param_vals: alloc::vec::Vec<Rc<Value>> = jc
+                .param_bindings
+                .iter()
+                .map(|b| b.borrow().clone())
+                .collect();
             for (i, val) in arg_vals.into_iter().enumerate() {
                 *jc.param_bindings[i].borrow_mut() = Rc::new(val);
             }
@@ -166,9 +174,6 @@ fn exec(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'stati
             // `Escape`s back to the interpreter (e.g. to dispatch a
             // call to another `JittedClosure`), name lookups need to
             // resolve to the same Bindings the JIT used.
-            //   1) Push the closure's captured env as a shared frame.
-            //   2) Push a NEW shared frame that maps each param name
-            //      to its pinned Binding (so name lookups find them).
             image.push_env(&jc.env);
             let mut param_frame: alloc::collections::BTreeMap<_, _> =
                 alloc::collections::BTreeMap::new();
@@ -177,10 +182,16 @@ fn exec(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'stati
             }
             image.push_env(&Rc::new(param_frame));
 
-            let result = jc.executor.borrow_mut().run(image);
+            let result = jc.executor.run(image);
 
             image.pop_frame();
             image.pop_frame();
+
+            // Restore the pinned param Bindings to their pre-call
+            // values, so the caller's view of these names is intact.
+            for (i, val) in saved_param_vals.into_iter().enumerate() {
+                *jc.param_bindings[i].borrow_mut() = val;
+            }
 
             result
         }

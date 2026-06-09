@@ -12,6 +12,7 @@
                        "hb" 'lispi-eval-buffer
                        "hc" 'lispi-remove-overlays
                        "hst" 'lispi-connect
+                       "he" 'lispi-toggle-fold-at-point
                        "hsp" 'lispi-disconnect))
                    (add-to-list 'auto-mode-alist '("\\.lispi\\'" . lisp-mode))
                    (add-hook 'lisp-mode-hook
