@@ -34,7 +34,6 @@
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::fmt;
 
 use crate::language::ast::{Closure, Symbol, Value};

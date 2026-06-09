@@ -380,6 +380,17 @@ impl EnrichedIRSegment {
                 self.update(d, SCCPState::Bottom, uses);
             }
 
+            // --- call: same taint rules as escape, since the callee may
+            // recursively bounce back into the interpreter and set! any
+            // in-scope local on this path.
+            Call { dst, .. } => {
+                let to_taint: Vec<LocalId> = reach_out[block].iter().copied().collect();
+                for id in to_taint {
+                    self.update_local(id, SCCPState::Bottom, local_uses);
+                }
+                self.update(dst, SCCPState::Bottom, uses);
+            }
+
             _ => {
                 if let Some((d, st)) = self.eval(s) {
                     self.update(&d, st, uses);
@@ -600,6 +611,11 @@ impl EnrichedIRSegment {
 
             FullIdx(d, _, _, _, _) | SysFull32(d, _, _, _, _)
                 => Some((d.clone(), Bottom)),
+
+            // Call result is opaque — like Escape, treat as Bottom.
+            // Handled here (not via `visit`) so the dst gets a value
+            // assignment in the lattice.
+            Call { dst, .. } => Some((dst.clone(), Bottom)),
 
             // No-dst stmts or handled in `visit`.
             Load(_, _)
@@ -909,6 +925,8 @@ fn stmt_operands(s: &IRStatement) -> Vec<VReg> {
         SysFull32(_, a, b, c, d) => vec![a.clone(), b.clone(), c.clone(), d.clone()],
 
         PhiOp(_, (_, a), (_, b)) => vec![a.clone(), b.clone()],
+
+        Call { args, .. } => args.clone(),
     }
 }
 
@@ -943,6 +961,8 @@ fn dst_reg(s: &IRStatement) -> Option<VReg> {
             => Some(d.clone()),
 
         PhiOp(d, _, _) => Some(d.clone()),
+
+        Call { dst, .. } => Some(dst.clone()),
 
         PushFrame | PopFrame | BindLocal { .. } | BindImmediate { .. }
         | StoreLocal(_, _) | StoreCapture(_, _)

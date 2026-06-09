@@ -461,10 +461,38 @@ impl IRSegment {
             // --- catch-all ---
             // Anything we haven't matched: regular function calls
             // (closure invocations), syscalls, computed callees, etc.
-            // The interpreter handles them. If the callee body is
-            // hot enough to JIT, that's decided on its own later run,
-            // not at this escape site.
-            _ => Ok(self.escape(&value)),
+            // For a (sym arg…) form whose `sym` resolves to a Capture
+            // (a stable Binding — globals / closure captures), lower
+            // directly to `Call` so each arg evaluates in the caller's
+            // IR instead of through the interpreter on every dispatch.
+            // Anything else (computed head, unbound, arity outside
+            // 1..=3) falls back to the full-sexp Escape.
+            _ => {
+                if let Value::Symbol(sym) = &*car {
+                    if let Resolution::Capture(b) = scope.binding(sym) {
+                        // Collect args; variable arity supported via
+                        // stack-based argv passing in the helper ABI.
+                        let mut args: Vec<VReg> = Vec::new();
+                        let mut i = 1;
+                        loop {
+                            let a = value.nth(i);
+                            if a.is_nil() { break; }
+                            args.push(self.cgen_inner(a, scope)?);
+                            i += 1;
+                        }
+                        if args.is_empty() {
+                            // 0-arg call: no fast-path win — the helper
+                            // is built around `(argc, argv)` so zero
+                            // args has the same overhead as escape.
+                            return Ok(self.escape(&value));
+                        }
+                        let dst = self.reg();
+                        self.emit(IRStatement::Call { dst: dst.clone(), callee: b, args });
+                        return Ok(dst);
+                    }
+                }
+                Ok(self.escape(&value))
+            }
         }
     }
 }

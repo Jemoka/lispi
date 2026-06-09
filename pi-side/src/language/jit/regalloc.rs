@@ -91,6 +91,8 @@ where F: FnMut(R) -> S {
         LdrValuePtr(d, v)      => LdrValuePtr(f(d), v),
         LdrNamePtr(d, n)       => LdrNamePtr(f(d), n),
         LdrCapture(d, b)       => LdrCapture(f(d), b),
+        LdrCapturePtr(d, b)    => LdrCapturePtr(f(d), b),
+        LdrCallCachePtr(d, i)  => LdrCallCachePtr(f(d), i),
         StrCapture(b, s)       => StrCapture(b, f(s)),
         LdrOffset(d, b, o)     => LdrOffset(f(d), f(b), o),
         StrOffset(s, b, o)     => StrOffset(f(s), f(b), o),
@@ -131,6 +133,7 @@ where F: FnMut(R) -> S {
         FullIdx                => FullIdx,
         Hits                   => Hits,
         Escape                 => Escape,
+        Call                   => Call,
         UartInit               => UartInit,
         UartGet8               => UartGet8,
         UartPut8               => UartPut8,
@@ -161,6 +164,7 @@ fn rename<R: Eq + Copy>(instr: &mut Instr<R>, from: R, to: R) {
         Mov(a, b)              => { r(a); r(b); }
         MovImm(d, _) | MovId(d, _)
         | LdrValuePtr(d, _) | LdrNamePtr(d, _) | LdrCapture(d, _)
+        | LdrCapturePtr(d, _) | LdrCallCachePtr(d, _)
         | LoadSpill(d, _) | Mvn(d, _) | Cset(d, _) => r(d),
         StrCapture(_, s) | StoreSpill(_, s) | CmpImm(s, _) => r(s),
         LdrOffset(d, b, _) => { r(d); r(b); }
@@ -185,7 +189,8 @@ fn uses(p: &Pseudo) -> Vec<Operand> {
     match p {
         Mov(_, s) => vec![*s],
         MovImm(_, _) | MovId(_, _)
-        | LdrValuePtr(_, _) | LdrNamePtr(_, _) | LdrCapture(_, _) => vec![],
+        | LdrValuePtr(_, _) | LdrNamePtr(_, _) | LdrCapture(_, _)
+        | LdrCapturePtr(_, _) | LdrCallCachePtr(_, _) => vec![],
         StrCapture(_, s) => vec![*s],
         LdrOffset(_, base, _) => vec![*base],
         StrOffset(s, base, _) => vec![*s, *base],
@@ -208,7 +213,7 @@ fn uses(p: &Pseudo) -> Vec<Operand> {
         | Box | Truthy | LogNot | Xor | Div | Mod | Cons | Nullp
         | Array | Full | Unpack
         | GetIdx | PutIdx | ReadIdx | FillIdx | FullIdx
-        | Hits | Escape
+        | Hits | Escape | Call
         | UartInit | UartGet8 | UartPut8 | Delay
         | ClearMonitor | GetMonitor | StopMonitor
         | Zero32 | Full32 => vec![
@@ -230,6 +235,7 @@ fn defs(p: &Pseudo) -> Vec<Operand> {
     match p {
         Mov(d, _) | MovImm(d, _) | MovId(d, _)
         | LdrValuePtr(d, _) | LdrNamePtr(d, _) | LdrCapture(d, _)
+        | LdrCapturePtr(d, _) | LdrCallCachePtr(d, _)
         | LdrOffset(d, _, _) | LoadSpill(d, _)
         | Mvn(d, _) | Cset(d, _) => vec![*d],
         StrCapture(_, _) | StrOffset(_, _, _) | StoreSpill(_, _) => vec![],
@@ -244,7 +250,7 @@ fn defs(p: &Pseudo) -> Vec<Operand> {
         | Box | Truthy | LogNot | Xor | Div | Mod | Cons | Nullp
         | Array | Full | Unpack
         | GetIdx | PutIdx | ReadIdx | FillIdx | FullIdx
-        | Hits | Escape
+        | Hits | Escape | Call
         | UartInit | UartGet8 | UartPut8 | Delay
         | ClearMonitor | GetMonitor | StopMonitor
         | Zero32 | Full32 => vec![
@@ -266,8 +272,10 @@ fn is_terminator(p: &Pseudo) -> bool {
 
 // ===================== sequencer =====================
 
-fn lower_seg(seg: RIRSegment) -> (Vec<Vec<Pseudo>>, Vec<bool>, u32) {
+fn lower_seg(seg: RIRSegment) -> (Vec<Vec<Pseudo>>, Vec<bool>, u32, u32, u32) {
     let mut max_vreg = 0u32;
+    let mut max_call_args = 0u32;
+    let mut next_call_cache = 0u32;
     let mut blocks: Vec<Vec<Pseudo>> = Vec::with_capacity(seg.blocks.len());
     let mut dead: Vec<bool> = Vec::with_capacity(seg.blocks.len());
 
@@ -275,12 +283,17 @@ fn lower_seg(seg: RIRSegment) -> (Vec<Vec<Pseudo>>, Vec<bool>, u32) {
         let mut out: Vec<Pseudo> = Vec::new();
         for stmt in &blk.statements {
             walk_vregs(stmt, &mut |v| if v.0 > max_vreg { max_vreg = v.0 });
-            lower_stmt(stmt, &mut out);
+            if let RIRStatement::Call { args, .. } = stmt {
+                if (args.len() as u32) > max_call_args {
+                    max_call_args = args.len() as u32;
+                }
+            }
+            lower_stmt(stmt, &mut out, &mut next_call_cache);
         }
         blocks.push(out);
         dead.push(blk.dead);
     }
-    (blocks, dead, max_vreg + 1)
+    (blocks, dead, max_vreg + 1, max_call_args, next_call_cache)
 }
 
 fn walk_vregs(stmt: &RIRStatement, f: &mut impl FnMut(&VReg)) {
@@ -322,13 +335,14 @@ fn walk_vregs(stmt: &RIRStatement, f: &mut impl FnMut(&VReg)) {
         R::SysZero32(d, a, b, c) => { f(d); f(a); f(b); f(c); }
         R::SysFull32(d, a, b, c, e) => { f(d); f(a); f(b); f(c); f(e); }
         R::Escape(d, s) => { f(d); f(s); }
+        R::Call { dst, args, .. } => { f(dst); for a in args { f(a); } }
     }
 }
 
 fn v(x: &VReg) -> Operand { Operand::V(x.0) }
 fn p(r: Register) -> Operand { Operand::P(r) }
 
-fn lower_stmt(stmt: &RIRStatement, out: &mut Vec<Pseudo>) {
+fn lower_stmt(stmt: &RIRStatement, out: &mut Vec<Pseudo>, next_call_cache: &mut u32) {
     use Instr as I;
     use RIRStatement as R;
 
@@ -485,6 +499,33 @@ fn lower_stmt(stmt: &RIRStatement, out: &mut Vec<Pseudo>) {
         }
 
         R::Escape(d, s) => call!(Escape; args=[s]; dst=d),
+
+        // Variable-arity direct call. The asm lowering reserves a
+        // `call_args` region at the bottom of SP (offsets 0..N*4) per
+        // function; per call site we:
+        //   1. Stash each arg slot id at SP+(i*4) via StrOffset.
+        //   2. Load the captured binding pointer into r0 (no deref —
+        //      the helper does the deref + type check itself).
+        //   3. Move argc into r1.
+        //   4. Compute argv = SP into r2.
+        //   5. Load per-site CallCache cell address into r3 — helper
+        //      uses it to skip the BTreeMap closure resolution on
+        //      repeated calls to the same site.
+        //   6. `bl call` — Instr::Call.
+        //   7. Move r0 into dst.
+        R::Call { dst, callee, args } => {
+            let cache_idx = *next_call_cache;
+            *next_call_cache += 1;
+            for (i, a) in args.iter().enumerate() {
+                out.push(I::StrOffset(v(a), p(Register::SP), (i as i32) * 4));
+            }
+            out.push(I::LdrCapturePtr(p(Register::R0), callee.clone()));
+            out.push(I::MovImm(p(Register::R1), ImmNumber::Unsigned(args.len() as u32)));
+            out.push(I::Mov(p(Register::R2), p(Register::SP)));
+            out.push(I::LdrCallCachePtr(p(Register::R3), cache_idx));
+            out.push(I::Call);
+            out.push(I::Mov(v(dst), p(Register::R0)));
+        }
     }
 }
 
@@ -908,6 +949,8 @@ fn apply_colors(
     dead: Vec<bool>,
     color: BTreeMap<Operand, Register>,
     spill_slots: u32,
+    call_args_max: u32,
+    call_cache_count: u32,
 ) -> LIRSegment {
     let resolve = |o: Operand| -> Register {
         match o {
@@ -959,6 +1002,8 @@ fn apply_colors(
         blocks: out_blocks,
         spill_slots,
         callee_saves_used,
+        call_args_max,
+        call_cache_count,
     }
 }
 
@@ -997,7 +1042,8 @@ fn mul_fixup(seg: &mut LIRSegment) {
 // ===================== public entry =====================
 
 pub(crate) fn regalloc(seg: RIRSegment) -> LIRSegment {
-    let (mut blocks, dead, mut next_vreg) = lower_seg(seg);
+    let (mut blocks, dead, mut next_vreg, call_args_max, call_cache_count)
+        = lower_seg(seg);
 
     phi_destruct(&mut blocks, &dead, &mut next_vreg);
 
@@ -1017,7 +1063,8 @@ pub(crate) fn regalloc(seg: RIRSegment) -> LIRSegment {
         let (color, spill_set) = simplify_select_spill(&graph, &post_color_seed);
 
         if spill_set.is_empty() {
-            let mut seg = apply_colors(blocks, dead, color, next_spill);
+            let mut seg = apply_colors(
+                blocks, dead, color, next_spill, call_args_max, call_cache_count);
             mul_fixup(&mut seg);
             return seg;
         }

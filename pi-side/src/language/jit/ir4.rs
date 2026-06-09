@@ -170,6 +170,16 @@ pub(crate) enum Instr<R> {
     /// `ldr r12, =BINDING; ldr dst, [r12]` — emitted as a pair by the
     /// final asm. Source: IR3 `LoadCapture`.
     LdrCapture(R, Binding),
+    /// `ldr dst, =BINDING` — load the raw Binding cell pointer (no
+    /// dereference). Used by `Call` to hand the helper a stable
+    /// pointer to the captured slot, where the helper does its own
+    /// type/closure check on the inner value.
+    LdrCapturePtr(R, Binding),
+    /// `ldr dst, =CALL_CACHE_n` — load the address of the per-call-site
+    /// `CallCache` instance owned by the JitExecutor. The integer is
+    /// the index into the executor's `call_caches` Vec. Helper reads
+    /// the cell to fast-path closure resolution.
+    LdrCallCachePtr(R, u32),
     /// `ldr r12, =BINDING; str src, [r12]`. Source: IR3 `StoreCapture`.
     StrCapture(Binding, R),
     /// `ldr dst, [base, #off]`. Sources: IR3 `Unbox` (payload offset),
@@ -269,6 +279,22 @@ pub(crate) enum Instr<R> {
     Hits,
     /// `bl escape_to_interp`. Source: IR3 `Escape`.
     Escape,
+    /// `bl call`. Variable-arity dispatch through a runtime helper.
+    /// Calling convention:
+    ///   r0 = binding cell pointer (`*const RefCell<Rc<Value>>`)
+    ///   r1 = argc
+    ///   r2 = argv (pointer to `[argc; u32]` of slot ids — the caller
+    ///        stashes them in the dedicated call-args stack region
+    ///        reserved by the prologue at the bottom of SP)
+    /// Helper returns the result slot id in r0.
+    ///
+    /// The opcode itself is *generic* — the calling convention is just
+    /// "binding + argv". The current `h_call` helper happens to specialize
+    /// for Closure-valued bindings (fast-path JC dispatch, fallback to
+    /// interpreter); a future helper could dispatch other callable
+    /// shapes (Macro, foreign fn, etc.) over the same ABI.
+    /// Source: IR3 `Call`.
+    Call,
     /// `bl uart_init`. Source: IR3 `SysUartInit`.
     UartInit,
     /// `bl uart_get8`. Source: IR3 `SysUartGet8`.
@@ -357,6 +383,18 @@ pub(crate) struct LIRSegment {
     /// saves exactly the corresponding callee-saves.
     #[allow(dead_code)]
     pub callee_saves_used: u32,
+    /// Maximum arg count across all `Call` instructions in this segment.
+    /// Prologue reserves `4 * call_args_max` bytes at the bottom of SP
+    /// (offsets `0 .. call_args_max*4`); spill slots sit above this
+    /// region. Each `Call` stashes its args into this area before the
+    /// helper call and passes `sp` as the argv pointer.
+    #[allow(dead_code)]
+    pub call_args_max: u32,
+    /// Number of distinct `Call` sites in the segment. The executor
+    /// allocates this many `CallCache` cells; each `LdrCallCachePtr(_, i)`
+    /// references one by index.
+    #[allow(dead_code)]
+    pub call_cache_count: u32,
 }
 
 // ===================== pretty-printer =====================
@@ -393,6 +431,8 @@ pub(super) fn fmt_instr<R: fmt::Display>(
         Instr::LdrValuePtr(d, v) => { mn!("ldr=v")?; write!(f, "{}, #{}", d, v) }
         Instr::LdrNamePtr(d, n) => { mn!("ldr=n")?; write!(f, "{}, {:?}", d, n.as_str()) }
         Instr::LdrCapture(d, b) => { mn!("ldr=c")?; write!(f, "{}, [#{:p}]", d, b.as_ref().as_ptr()) }
+        Instr::LdrCapturePtr(d, b) => { mn!("ldr=cp")?; write!(f, "{}, #{:p}", d, b.as_ref().as_ptr()) }
+        Instr::LdrCallCachePtr(d, idx) => { mn!("ldr=cc")?; write!(f, "{}, #cache[{}]", d, idx) }
         Instr::StrCapture(b, s) => { mn!("str=c")?; write!(f, "[#{:p}], {}", b.as_ref().as_ptr(), s) }
         Instr::LdrOffset(d, b, o) => { mn!("ldr")?; write!(f, "{}, [{}, #{}]", d, b, o) }
         Instr::StrOffset(s, b, o) => { mn!("str")?; write!(f, "{}, [{}, #{}]", s, b, o) }
@@ -437,6 +477,15 @@ pub(super) fn fmt_instr<R: fmt::Display>(
         Instr::FullIdx        => bl!("array_fullidx"),
         Instr::Hits           => bl!("hits_counter"),
         Instr::Escape         => bl!("escape_to_interp"),
+        // `Call` is a single LIR opcode but the asm emit expands it to
+        // 8 words: inline cache check + bl h_call_fast / bl h_call.
+        // The printed form makes the expansion visible so the LIR dump
+        // doesn't mislead readers into thinking it's a single `bl`.
+        Instr::Call           => write!(
+            f,
+            "{:<width$}cache[r3]?fast:slow  ; 8w: ldr r12,[r3]; cmp; beq Ls; \
+             bl h_call_fast; b Ld; Ls: bl h_call; Ld:",
+            "call*", width = W),
         Instr::UartInit       => bl!("uart_init"),
         Instr::UartGet8       => bl!("uart_get8"),
         Instr::UartPut8       => bl!("uart_put8"),

@@ -36,7 +36,16 @@ pub enum Syscall {
     Unpack1to16,
     ClearSetMonitor,
     GetMonitor,
-    StopMonitor
+    StopMonitor,
+    /// `(@timer/us)` — read the BCM2835 system timer's low 32-bit
+    /// counter (`SYSTIMER_CLO` at 0x2000_3004). The counter is a free-
+    /// running 1 MHz tick, so the returned `Unsigned` is microseconds
+    /// since boot. Wraps every ~71 minutes.
+    TimerUs,
+    /// `(@timer/us64)` — read the full 64-bit system timer as a cons
+    /// `(hi . lo)` of two Unsigned values. Use this when you need to
+    /// span longer than 71 minutes or want to avoid wraparound math.
+    TimerUs64,
 }
 
 impl Syscall {
@@ -106,9 +115,21 @@ impl Syscall {
         if name.eq_ignore_ascii_case("monitor/stop") {
             return Some(Self::StopMonitor);
         }
+        if name.eq_ignore_ascii_case("timer/us") {
+            return Some(Self::TimerUs);
+        }
+        if name.eq_ignore_ascii_case("timer/us64") {
+            return Some(Self::TimerUs64);
+        }
         None
     }
 }
+
+// BCM2835 system timer base + low-word offset. `SYSTIMER_CLO` increments
+// at 1 MHz and is the canonical "microseconds since boot" source.
+const SYSTIMER_BASE: usize = 0x2000_3000;
+const SYSTIMER_CLO: usize  = SYSTIMER_BASE + 0x04;
+const SYSTIMER_CHI: usize  = SYSTIMER_BASE + 0x08;
 
 
 #[repr(u8)]
@@ -204,6 +225,32 @@ pub fn execute_syscall(
                 ::core::arch::asm!("mcr p15, 0, {val}, c15, c12, 0", val = in(reg) val);
             };
             Ok(Value::Nil)
+        }
+        Syscall::TimerUs => {
+            // Single 32-bit read of CLO. Wall-clock microseconds; wraps
+            // every ~71 min. Cheap to read (one MMIO load) and free of
+            // PMU-state mutation, so it's the right tool for wall-time
+            // benchmarking — orthogonal to `(@monitor/get)` which also
+            // exposes PMU event counters.
+            let lo = unsafe { get32(SYSTIMER_CLO) };
+            Ok(Value::Number(super::number::Number::Unsigned(lo)))
+        }
+        Syscall::TimerUs64 => {
+            // BCM2835 system timer is a 64-bit value across two 32-bit
+            // MMIO regs; we read CHI, CLO, CHI again to detect the
+            // (rare) carry across the read pair and retry if it tripped.
+            let (hi, lo) = unsafe {
+                loop {
+                    let hi1 = get32(SYSTIMER_CHI);
+                    let lo  = get32(SYSTIMER_CLO);
+                    let hi2 = get32(SYSTIMER_CHI);
+                    if hi1 == hi2 { break (hi1, lo); }
+                }
+            };
+            Ok(Value::cons(
+                Value::Number(super::number::Number::Unsigned(hi)),
+                Value::Number(super::number::Number::Unsigned(lo)),
+            ))
         }
         // Syscall::Apple => {
         //     // Returns (addr nframes) pointing to the raw 1bpp Bad Apple data.

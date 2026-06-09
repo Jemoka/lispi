@@ -173,6 +173,11 @@ pub(crate) enum MIRStatement {
 
     SysFull32(ImmReg, ImmReg, ImmReg, ImmReg, ImmReg),
 
+    // --- direct closure call ---
+    /// Direct closure dispatch via captured Binding. Result is always
+    /// a HeapReg (the callee's return slot). All args boxed up.
+    Call { dst: HeapReg, callee: Binding, args: Vec<HeapReg> },
+
     // --- escape (interpreter bailout) ---
     Escape(HeapReg, HeapReg),
 }
@@ -244,6 +249,9 @@ fn classify_dst(stmt: &IRStatement, kinds: &mut BTreeMap<VReg, Kind>) {
         | FullIdx(d, _, _, _, _)
         | Escape(d, _)
             => { kinds.insert(d.clone(), Kind::Heap); }
+
+        // Call returns a heap slot id from the runtime helper.
+        Call { dst, .. } => { kinds.insert(dst.clone(), Kind::Heap); }
 
         PhiOp(d, (_, a), (_, b)) => {
             // Default unclassified arms (e.g. arm in a dead block whose
@@ -600,6 +608,15 @@ fn lower_stmt(
             let s = ctx.use_heap(src, out);
             out.push(M::Escape(HeapReg(d.0), s));
         }
+
+        // direct call — box each arg, push Call.
+        I::Call { dst, callee, args } => {
+            let mut harg: alloc::vec::Vec<HeapReg> = alloc::vec::Vec::with_capacity(args.len());
+            for a in args {
+                harg.push(ctx.use_heap(a, out));
+            }
+            out.push(M::Call { dst: HeapReg(dst.0), callee: callee.clone(), args: harg });
+        }
     }
 }
 
@@ -754,6 +771,17 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &MIRStatement) -> fmt::Result {
         MIRStatement::Ret(r) => { mn!("ret")?; fmt_heap(f, r) }
 
         MIRStatement::Escape(r, src) => uno_h(f, "esc", r, src),
+
+        MIRStatement::Call { dst, callee, args } => {
+            mn!("call")?;
+            fmt_heap(f, dst)?;
+            write!(f, ", [#{:p}]", callee.as_ref().as_ptr())?;
+            for a in args {
+                write!(f, ", ")?;
+                fmt_heap(f, a)?;
+            }
+            Ok(())
+        }
     }
 }
 

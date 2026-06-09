@@ -326,6 +326,17 @@ impl EnrichedMIRSegment {
                 self.update(d.0, SCCPState::Bottom, uses);
             }
 
+            // --- direct call: same conservative taint as escape (the
+            // callee can recursively bounce back into the interpreter
+            // and set! any captured local on this path).
+            Call { dst, .. } => {
+                let to_taint: Vec<LocalId> = reach_out[block].iter().copied().collect();
+                for id in to_taint {
+                    self.update_local(id, SCCPState::Bottom, local_uses);
+                }
+                self.update(dst.0, SCCPState::Bottom, uses);
+            }
+
             _ => {
                 if let Some((d, st)) = self.eval(s) {
                     self.update(d, st, uses);
@@ -556,6 +567,9 @@ impl EnrichedMIRSegment {
             SysPut32(d, _, _) => Some((d.0, Bottom)),
             SysZero32(d, _, _, _) => Some((d.0, Bottom)),
             SysFull32(d, _, _, _, _) => Some((d.0, Bottom)),
+
+            // Call result is opaque (Bottom).
+            Call { dst, .. } => Some((dst.0, Bottom)),
 
             // handled in visit, or no dst
             LoadValueImm(_, _) | LoadValuePtr(_, _)
@@ -921,6 +935,9 @@ fn dst_reg(s: &MIRStatement) -> Option<(u32, bool)> {
 
         PhiOpHeap(d, _, _) => Some((d.0, false)),
 
+        // Call dst is heap.
+        Call { dst, .. } => Some((dst.0, false)),
+
         // no dst
         PushFrame | PopFrame
         | BindLocal { .. } | BindImmediate { .. }
@@ -978,6 +995,8 @@ fn stmt_operands(s: &MIRStatement) -> Vec<u32> {
 
         PhiOpImm(_, (_, a), (_, b))  => vec![a.0, b.0],
         PhiOpHeap(_, (_, a), (_, b)) => vec![a.0, b.0],
+
+        Call { args, .. } => args.iter().map(|a| a.0).collect(),
     }
 }
 

@@ -33,46 +33,200 @@
     (cons (car a) (append (cdr a) b))))
 
 
-;; (defun fib (n)
-;;   (if (or (eq n 0) (eq n 1))
-;;       n
-;;     (+ (fib (- n 1)) (fib (- n 2)))))
+(defun fib (n)
+  (if (or (eq n 0) (eq n 1))
+      n
+    (+ (fib (- n 1)) (fib (- n 2)))))
+
+;; non-recursive, compute-heavy mixer for JIT benchmarking.
+;; ~40 arithmetic ops on a single integer input, fully straight-line.
+(defun blend (x)
+  (let (a (+ (* x x) 7)
+        b (- (* x 3) 5))
+    (let (c (+ (* a b) (* a 2))
+          d (- (* b b) (* a 3)))
+      (let (e (* (+ c d) (- c b))
+            f (+ (* d 11) (- c a)))
+        (let (g (* (+ e f) (- e d))
+              h (- (* f 13) (* e 2)))
+          (let (i (+ (* g h) (* g 17))
+                j (- (* h h) (* g 5)))
+            (let (k (* (+ i j) (- i h))
+                  l (+ (* j 19) (- i g)))
+              (let (m (* (+ k l) (- k j))
+                    n (- (* l 23) (* k 7)))
+                (+ (* m n) (- m l))))))))))
 
 
-;; (ir fib)
+(let (start (@timer/us))
+  (begin 
+   (blend 128)
+   (blend 128)
+   (blend 128)
+   (blend 128)
+   (blend 128)
+   (- (@timer/us) start)))
 
-;; (+ 1 1)
+(let (start (@timer/us)
+            jitted (jit blend 1))
+  (begin 
+   (jitted 128)
+   (jitted 128)
+   (jitted 128)
+   (jitted 128)
+   (jitted 128)
+   (- (@timer/us) start)))
+
+;; (begin 
+;;  (@monitor/clear)
+;;  (let (mo (@monitor/get)
+;;           jm (jit blend 1))
+;;    (begin
+;;     (jm 512)
+;;     (- (car mo) (car (@monitor/get))))))
+
+;; (begin 
+;;  (@monitor/clear)
+;;  (let (mo (@monitor/get))
+;;    (begin
+;;     (blend 512)
+;;     (- (car mo) (car (@monitor/get))))))
 
 
-;; (set chicken (repeat 4096 3))
-;; (nth chicken 81)
 
 (defun fib (n)
   (if (or (eq n 0) (eq n 1))
       n
     (+ (fib (- n 1)) (fib (- n 2)))))
 
-(set jf (jit fib 1))
+(/ (begin 
+ (let (jm (jit fib 1)
+          mo (@timer/us))
+   (begin
+    (jm 1)
+    (jm 2)
+    (jm 3)
+    (jm 4)
+    (jm 5)
 
-(begin
+    (jm 6)
+    (jm 7)
+    (jm 8)
+    (jm 9)
+    (jm 10)
+
+    (jm 11)
+    (jm 12)
+    (jm 13)
+    (jm 14)
+    (jm 15)
+
+    (jm 16)
+    (jm 17)
+    (jm 18)
+    (jm 19)
+
+    (jm 20)
+    (jm 21)
+    (jm 22)
+    (jm 23)
+    (- (@timer/us) mo)))) 10000)
+
+
+(/ (begin 
  (@monitor/clear)
- (let (a (car (@monitor/get)))
-   (begin 
-    (jf 19)
-    (- (car (@monitor/get)) a))))
+ (let (mo (@timer/us))
+   (begin
+    (fib 1)
+    (fib 2)
+    (fib 3)
+    (fib 4)
+    (fib 5)
 
-(begin
-    (@monitor/clear)
-    (let (a (car (@monitor/get)))
-      (begin 
-       (fib 19)
-       (- (car (@monitor/get)) a))))
+    (fib 6)
+    (fib 7)
+    (fib 8)
+    (fib 9)
+    (fib 10)
 
-;; (@monitor/get)
+    (fib 11)
+    (fib 12)
+    (fib 13)
+    (fib 14)
+    (fib 15)
+
+    (fib 16)
+    (fib 17)
+    (fib 18)
+    (fib 19)
+
+    (fib 20)
+    (fib 21)
+    (fib 22)
+    (fib 23)
+    (- (@timer/us) mo)))) 10000)
 
 
-;; (fib 19)
 
-;; ;; (set jb (jit blend 3))
-;; ;; (jb 7)
-;; ;; (blend 7)
+(/ (let (mo (@timer/us)
+            jm (jit fib 1))
+     (begin
+      (jm 1)
+      (jm 2)
+      (jm 3)
+      (jm 4)
+      (jm 5)
+
+      (jm 6)
+      (jm 7)
+      (jm 8)
+      (jm 9)
+      (jm 10)
+
+      (jm 11)
+      (jm 12)
+      (jm 13)
+      (jm 14)
+      (jm 15)
+
+      (jm 16)
+      (jm 17)
+      (jm 18)
+      (jm 19)
+
+      (jm 20)
+      (jm 21)
+      (jm 22)
+      (jm 23)
+      (- (@timer/us) mo))) 100000)
+
+(/ (let (mo (@timer/us))
+     (begin
+      (fib 1)
+      (fib 2)
+      (fib 3)
+      (fib 4)
+      (fib 5)
+
+      (fib 6)
+      (fib 7)
+      (fib 8)
+      (fib 9)
+      (fib 10)
+
+      (fib 11)
+      (fib 12)
+      (fib 13)
+      (fib 14)
+      (fib 15)
+
+      (fib 16)
+      (fib 17)
+      (fib 18)
+      (fib 19)
+
+      (fib 20)
+      (fib 21)
+      (fib 22)
+      (fib 23)
+      (- (@timer/us) mo))) 100000)

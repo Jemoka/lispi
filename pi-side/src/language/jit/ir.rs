@@ -236,6 +236,19 @@ pub(crate) enum IRStatement {
     // 4-arg
     SysFull32(VReg, VReg, VReg, VReg, VReg),  // dst (nil), addr, offset, n, val
 
+    // --- direct closure call ---
+    //
+    // When the head of a cons form resolves to a captured (non-local)
+    // Binding at IR-gen time, lower the call directly instead of
+    // escaping the whole sexp. Args are evaluated in the caller's IR;
+    // the runtime helper resolves the binding to a Closure, dispatches
+    // through the executor's JC cache, and returns the result slot.
+    /// Direct dispatch: `dst = call(callee.binding, args...)`.
+    /// Supported arity is 1-3 (lower bound: must have ≥1 arg; upper
+    /// bound: AAPCS gives us r1..r3 after r0 = binding_ptr). Higher-
+    /// arity forms fall back to `Escape` at IR-gen time.
+    Call { dst: VReg, callee: Binding, args: Vec<VReg> },
+
     // --- escape hatch ---
 
     /// Evaluate the value in `src` through the interpreter and put the
@@ -540,6 +553,19 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &IRStatement) -> fmt::Result {
             write!(f, "]")
         }
         IRStatement::Ret(r) => { mn!("ret")?; fmt_vreg(f, r) }
+
+        // --- call ---
+        IRStatement::Call { dst, callee, args } => {
+            mn!("call")?;
+            fmt_vreg(f, dst)?;
+            write!(f, ", ")?;
+            fmt_binding(f, callee)?;
+            for a in args {
+                write!(f, ", ")?;
+                fmt_vreg(f, a)?;
+            }
+            Ok(())
+        }
 
         // --- escape ---
         IRStatement::Escape(r, src) => uno(f, "esc", r, src),

@@ -74,6 +74,42 @@ const TAG_MACRO: u32 = 13;
 /// construction.
 const SLOT_CAPACITY: usize = 4096;
 
+// =================== inline call-site cache ===================
+
+/// Per-`Call`-site inline cache. Each `Call` site in the LIR gets its
+/// own heap-stable `CallCache` instance whose address is baked into
+/// the literal pool. On first dispatch the helper resolves the callee
+/// through `get_or_compile_callee`, writes the resolved JC pointer
+/// and the binding's current inner-Rc address into this struct, and
+/// uses them on every subsequent call to skip the BTreeMap lookup.
+///
+/// Layout is `#[repr(C)]` so the JIT-emitted code (if we ever inline
+/// the cache check in assembly) can index the fields by stable offset.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct CallCache {
+    /// Cached `JittedClosure` raw pointer (kept alive by the
+    /// outermost executor's `specializations` cache). Null = unset.
+    pub jc_ptr: *const super::jit::JittedClosure,
+    /// `Rc::as_ptr(&binding's current inner)` captured at cache-write
+    /// time. If a later `(set …)` re-targets the binding to a different
+    /// `Rc<Value>`, this address changes — we detect it and invalidate.
+    pub value_inner_ptr: *const Value,
+}
+
+impl CallCache {
+    pub(crate) const fn null() -> Self {
+        CallCache {
+            jc_ptr: core::ptr::null(),
+            value_inner_ptr: core::ptr::null(),
+        }
+    }
+}
+
+// `*const`s are not Send/Sync by default — fine because the runtime is
+// single-threaded and cache cells are only ever accessed from the
+// current thread.
+
 // =================== file-wide globals ===================
 
 static mut IMAGE: *mut Image = core::ptr::null_mut();
@@ -590,6 +626,7 @@ static mut DISPATCH_CACHE_VEC: Vec<Option<Rc<super::jit::JittedClosure>>> = Vec:
 /// already done. Returns `None` to signal "fall back to interp" only
 /// if arg eval / type check fails.
 unsafe fn dispatch_cached(sexp: &Value, jc: &Rc<super::jit::JittedClosure>) -> Option<u32> {
+    unsafe {
     let image = image_ref();
     let arity = jc.params.len();
     // Snapshot + write inline for the common arity-1 case (fib), Vec
@@ -637,11 +674,13 @@ unsafe fn dispatch_cached(sexp: &Value, jc: &Rc<super::jit::JittedClosure>) -> O
         *jc.param_bindings[i].as_ptr() = saved;
     }
     Some(match result { Ok(v) => intern_value(&v), Err(_) => 0 })
+    }
 }
 
 /// Like `try_autojit_call` but on success also returns the resolved
 /// `JittedClosure` so `h_escape` can stash it in the per-slot cache.
 unsafe fn try_autojit_call_returning_jc(sexp: &Value) -> Option<(u32, Rc<super::jit::JittedClosure>)> {
+    unsafe {
     let executor_ptr = CURRENT_EXECUTOR;
     if executor_ptr.is_null() { return None; }
     let (head, _) = match sexp {
@@ -667,6 +706,7 @@ unsafe fn try_autojit_call_returning_jc(sexp: &Value) -> Option<(u32, Rc<super::
     let jc = executor.get_or_compile_callee(&closure, &arg_vals, image)?;
     let slot = dispatch_cached(sexp, &jc)?;
     Some((slot, jc))
+    }
 }
 
 /// If `sexp` is a `(symbol args...)` form whose head resolves to a
@@ -758,6 +798,301 @@ unsafe fn try_autojit_call(sexp: &Value) -> Option<u32> {
         Ok(v) => intern_value(&v),
         Err(_) => 0,
     })
+}
+
+// =================== direct call helpers ===================
+//
+// h_call_N(binding_ptr, arg0[, arg1[, arg2]]) → result slot id.
+//
+// The JIT-emitted caller has already:
+//   * Loaded the captured Binding's raw cell-pointer into r0 (via
+//     LdrCapturePtr — no deref).
+//   * Materialized each arg as a slot id in r1..r(N).
+//
+// Our job: deref the binding to fetch the current Value; if it's a
+// Closure, route through the executor's JC cache (compiling on demand)
+// and dispatch; reify each arg slot to a Value, type-check, swap into
+// the JC's param bindings, run, restore. Identical to the body of
+// `try_autojit_call` minus the symbol lookup and sexp reification.
+//
+// Anything goes wrong (not a closure, wrong arity, type mismatch, no
+// current executor): fall back to the interpreter by reconstructing
+// the equivalent sexp `(<closure> args...)` and calling `evaluate()`.
+// Reconstruction is on the cold path, so this stays cheap on the hot
+// path.
+
+unsafe fn h_call_common(binding_ptr: *const RefCell<Rc<Value>>, args: &[u32]) -> u32 {
+    unsafe {
+        // 1) Read the binding's current value.
+        let rc_ptr = (*binding_ptr).as_ptr();
+        let value_rc: Rc<Value> = (*rc_ptr).clone();
+        let closure = match &*value_rc {
+            Value::Closure(c) => c.clone(),
+            _ => {
+                // Not a closure — interpreter fallback. Build (<value> args...).
+                return h_call_fallback(&value_rc, args);
+            }
+        };
+        if closure.params.len() != args.len() {
+            return h_call_fallback(&value_rc, args);
+        }
+
+        // 2) Reify args into Values.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+        for &s in args {
+            arg_vals.push(reify_slot(s));
+        }
+
+        // 3) Get/compile the JC.
+        let executor_ptr = CURRENT_EXECUTOR;
+        if executor_ptr.is_null() {
+            return h_call_fallback(&value_rc, args);
+        }
+        let executor: &JitExecutor = &*executor_ptr;
+        let image = image_ref();
+        let jc = match executor.get_or_compile_callee(&closure, &arg_vals, image) {
+            Some(j) => j,
+            None => return h_call_fallback(&value_rc, args),
+        };
+
+        // 4) Type guard.
+        for (i, v) in arg_vals.iter().enumerate() {
+            if !jc.input_types[i].accepts(v) {
+                return h_call_fallback(&value_rc, args);
+            }
+        }
+
+        // 5) Snapshot param bindings, swap in new values, dispatch.
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        for b in &jc.param_bindings {
+            let cur = (*b.as_ptr()).clone();
+            snap_stack.push(cur);
+        }
+        for (i, val) in arg_vals.into_iter().enumerate() {
+            *jc.param_bindings[i].as_ptr() = Rc::new(val);
+        }
+        image.push_env(&jc.env);
+        image.push_env(&jc.param_env);
+        let result = jc.executor.run(image);
+        image.pop_frame();
+        image.pop_frame();
+        for i in (0..jc.param_bindings.len()).rev() {
+            let saved = snap_stack.pop().unwrap();
+            *jc.param_bindings[i].as_ptr() = saved;
+        }
+
+        match result {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Cached-dispatch fast entry. ABI is identical to `h_call`, but this
+/// helper *assumes* the cache is hot:
+///   * `(*cache).jc_ptr` is non-null.
+///   * The call site checked this before branching here.
+///
+/// It still validates `value_inner_ptr` cheaply (one load + one cmp) —
+/// if the binding got `(set! …)`-re-targeted since cache write, we
+/// re-route to `h_call` which invalidates and re-resolves. On the hot
+/// path (no `set!`), this skips the BTreeMap-walk codepath in `h_call`
+/// and the slow-path branch + type-mismatch handling, leaving a tighter
+/// body for the JIT-emitted caller to `bl` into.
+unsafe extern "C" fn h_call_fast(
+    binding_ptr: *const RefCell<Rc<Value>>,
+    argc: u32,
+    argv: *const u32,
+    cache_cell: *const core::cell::UnsafeCell<CallCache>,
+) -> u32 {
+    unsafe {
+        let args = core::slice::from_raw_parts(argv, argc as usize);
+
+        let cc: *mut CallCache = (*cache_cell).get();
+        let cell_ptr = (*binding_ptr).as_ptr();
+        let current_inner: *const Value = Rc::as_ptr(&*cell_ptr);
+
+        // Cheap validity probe — `(set! …)` would change the inner
+        // alloc address. On mismatch invalidate + bounce to slow path.
+        if (*cc).value_inner_ptr != current_inner {
+            (*cc).jc_ptr = core::ptr::null();
+            (*cc).value_inner_ptr = core::ptr::null();
+            return h_call(binding_ptr, argc, argv, cache_cell);
+        }
+
+        let jc: &super::jit::JittedClosure = &*(*cc).jc_ptr;
+
+        // Reify args.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+        for &s in args {
+            arg_vals.push(reify_slot(s));
+        }
+
+        // Arity + type guard. Mismatch here means the binding still
+        // points to the same closure but the caller's arg shape no
+        // longer matches what the cached JC was specialized for — fall
+        // back via the canonical sexp path.
+        if jc.params.len() != args.len() {
+            let v = (*cell_ptr).clone();
+            return h_call_fallback(&v, args);
+        }
+        for (i, v) in arg_vals.iter().enumerate() {
+            if !jc.input_types[i].accepts(v) {
+                let v = (*cell_ptr).clone();
+                return h_call_fallback(&v, args);
+            }
+        }
+
+        // Snapshot + swap + dispatch + restore (same as `h_call`'s tail).
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        for b in &jc.param_bindings {
+            snap_stack.push((*b.as_ptr()).clone());
+        }
+        for (i, val) in arg_vals.into_iter().enumerate() {
+            *jc.param_bindings[i].as_ptr() = Rc::new(val);
+        }
+        let image_m = image_ref();
+        image_m.push_env(&jc.env);
+        image_m.push_env(&jc.param_env);
+        let result = jc.executor.run(image_m);
+        image_m.pop_frame();
+        image_m.pop_frame();
+        for i in (0..jc.param_bindings.len()).rev() {
+            *jc.param_bindings[i].as_ptr() = snap_stack.pop().unwrap();
+        }
+
+        match result {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Reconstruct `(callee_value args...)` as a Cons sexp and hand it to
+/// the interpreter. Used when fast-path dispatch isn't possible.
+unsafe fn h_call_fallback(callee_value: &Rc<Value>, args: &[u32]) -> u32 {
+    unsafe {
+        // Build the args list right-to-left.
+        let mut tail = Value::Nil;
+        for &s in args.iter().rev() {
+            let v = reify_slot(s);
+            tail = Value::cons(v, tail);
+        }
+        let sexp = Value::cons((**callee_value).clone(), tail);
+        match evaluate(Rc::new(sexp), image_ref()) {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Variable-arity call entry. ABI:
+///   r0 = binding cell pointer
+///   r1 = argc
+///   r2 = argv (`*const u32`, slot ids)
+///   r3 = cache_cell (`*const UnsafeCell<CallCache>`)
+///
+/// Fast path: if the cache's `jc_ptr` is non-null AND the binding's
+/// current inner-Rc allocation address matches the one captured at
+/// cache-write time (i.e. nobody `(set! …)`-re-targeted the binding
+/// to a different `Rc<Value>`), reuse the cached JC directly. This
+/// skips the BTreeMap walk inside `get_or_compile_callee` on every
+/// call after the first.
+///
+/// Slow path: full resolve through the executor; populate the cache
+/// on success so subsequent calls hit fast.
+unsafe extern "C" fn h_call(
+    binding_ptr: *const RefCell<Rc<Value>>,
+    argc: u32,
+    argv: *const u32,
+    cache_cell: *const core::cell::UnsafeCell<CallCache>,
+) -> u32 {
+    unsafe {
+        let args = core::slice::from_raw_parts(argv, argc as usize);
+
+        // Resolve the binding's *current* inner Rc<Value> allocation
+        // pointer. This is the invariant we cache against — it only
+        // changes if `(set! …)` re-targets the binding.
+        let cell_ptr = (*binding_ptr).as_ptr();
+        let current_inner: *const Value = Rc::as_ptr(&*cell_ptr);
+        let cc: *mut CallCache = (*cache_cell).get();
+
+        // Reify args once. Used both for slow-path get_or_compile_callee
+        // (it needs Values for input-type derivation) and for type-guard
+        // checks on the fast path.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+        for &s in args {
+            arg_vals.push(reify_slot(s));
+        }
+
+        // Resolve JC: cache or full lookup.
+        let _jc_keepalive: Option<Rc<super::jit::JittedClosure>>;
+        let jc_ptr: *const super::jit::JittedClosure;
+
+        if !(*cc).jc_ptr.is_null() && (*cc).value_inner_ptr == current_inner {
+            jc_ptr = (*cc).jc_ptr;
+            _jc_keepalive = None; // executor's `specializations` holds it
+        } else {
+            let value_rc: Rc<Value> = (*cell_ptr).clone();
+            let closure = match &*value_rc {
+                Value::Closure(c) => c.clone(),
+                _ => return h_call_fallback(&value_rc, args),
+            };
+            if closure.params.len() != args.len() {
+                return h_call_fallback(&value_rc, args);
+            }
+            let executor_ptr = CURRENT_EXECUTOR;
+            if executor_ptr.is_null() {
+                return h_call_fallback(&value_rc, args);
+            }
+            let executor: &JitExecutor = &*executor_ptr;
+            let image_m = image_ref();
+            let jc_rc = match executor.get_or_compile_callee(&closure, &arg_vals, image_m) {
+                Some(j) => j,
+                None => return h_call_fallback(&value_rc, args),
+            };
+            // Populate cache for next-time fast path.
+            (*cc).jc_ptr = Rc::as_ptr(&jc_rc);
+            (*cc).value_inner_ptr = current_inner;
+            jc_ptr = Rc::as_ptr(&jc_rc);
+            _jc_keepalive = Some(jc_rc);
+        }
+
+        let jc: &super::jit::JittedClosure = &*jc_ptr;
+
+        // Type guard (cached JC was compiled for specific input_types;
+        // if current args don't match — e.g. caller passes a Bool when
+        // the cached body expects Integer — fall back to interpreter).
+        for (i, v) in arg_vals.iter().enumerate() {
+            if !jc.input_types[i].accepts(v) {
+                let v = (*cell_ptr).clone();
+                return h_call_fallback(&v, args);
+            }
+        }
+
+        // Snapshot + swap + dispatch + restore.
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        for b in &jc.param_bindings {
+            snap_stack.push((*b.as_ptr()).clone());
+        }
+        for (i, val) in arg_vals.into_iter().enumerate() {
+            *jc.param_bindings[i].as_ptr() = Rc::new(val);
+        }
+        let image_m = image_ref();
+        image_m.push_env(&jc.env);
+        image_m.push_env(&jc.param_env);
+        let result = jc.executor.run(image_m);
+        image_m.pop_frame();
+        image_m.pop_frame();
+        for i in (0..jc.param_bindings.len()).rev() {
+            *jc.param_bindings[i].as_ptr() = snap_stack.pop().unwrap();
+        }
+
+        match result {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
 }
 
 unsafe extern "C" fn h_hits(slot_id: u32) -> u32 {
@@ -957,6 +1292,12 @@ pub(crate) struct JitExecutor {
     value_literals: Vec<Rc<Value>>,
     /// Pinned Name (Symbol) literals.
     name_literals: Vec<Rc<Name>>,
+    /// Per-`Call`-site inline caches. The literal pool stores
+    /// `&*call_caches[i]` (a stable heap address); the `Box` keeps
+    /// the underlying `CallCache` allocation alive for the executor's
+    /// lifetime.
+    #[allow(dead_code)]
+    call_caches: Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
     /// Byte offset of the entry point in `code` (always 0 for now).
     entry_offset: usize,
     /// Auto-JIT cache. Populated lazily when a JIT body Escapes a call
@@ -982,7 +1323,8 @@ pub(crate) struct JitExecutor {
 
 impl JitExecutor {
     pub(crate) fn new(seg: LIRSegment) -> Self {
-        let (code, captures, value_literals, name_literals) = emit_segment(&seg);
+        let (code, captures, value_literals, name_literals, call_caches)
+            = emit_segment(&seg);
 
         // We just wrote `code` via normal Rust stores — those land in
         // the D-cache. With D-cache enabled (post `mmu_init`) the
@@ -1008,6 +1350,7 @@ impl JitExecutor {
             captures,
             value_literals,
             name_literals,
+            call_caches,
             entry_offset: 0,
             specializations: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
             currently_compiling: core::cell::RefCell::new(alloc::collections::BTreeSet::new()),
@@ -1259,6 +1602,10 @@ enum LiteralKind {
     /// Address of the file-wide `SLOT_BUMP` static — emitted code
     /// reads/writes it for inline slot allocation.
     SlotBumpStaticAddr,
+    /// Address of a per-`Call`-site `CallCache` instance owned by the
+    /// `JitExecutor` (lifetime tied to the executor's `call_caches`
+    /// Vec — heap-stable so the baked address remains valid).
+    CallCacheAddr(u32), // index into `Emitter::call_caches`
 }
 
 struct Emitter {
@@ -1273,9 +1620,22 @@ struct Emitter {
     captures: Vec<Binding>,
     value_literals: Vec<Rc<Value>>,
     name_literals: Vec<Rc<Name>>,
+    /// Per-`Call`-site inline caches. Each `Box` holds a stable heap
+    /// address that survives moves of the Vec itself, so we can bake
+    /// `as_ref() as *const _` into the literal pool. Index identity
+    /// matches the `Instr::LdrCallCachePtr(_, idx)` operand and the
+    /// `LiteralKind::CallCacheAddr(idx)` pool entry.
+    call_caches: Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
     /// Total bytes of spill area reserved by the prologue. Epilogue
-    /// uses this to restore SP.
+    /// uses this to restore SP. Includes both `call_args_max` bytes
+    /// (at lowest SP offsets) and `spill_slots` bytes (above) plus
+    /// any alignment padding.
     spill_slots_bytes: u32,
+    /// Number of `u32` slots reserved at the bottom of SP for call-
+    /// argument marshalling. `LoadSpill(N)`/`StoreSpill(N)` lowerings
+    /// add `call_args_max * 4` to their offset so spill slots live
+    /// above this region.
+    call_args_max: u32,
     /// Register-list bitmask for the epilogue's `pop {…, pc}` —
     /// callee-saves used + PC.
     epilogue_mask: u16,
@@ -1291,7 +1651,9 @@ impl Emitter {
             captures: Vec::new(),
             value_literals: Vec::new(),
             name_literals: Vec::new(),
+            call_caches: Vec::new(),
             spill_slots_bytes: 0,
+            call_args_max: 0,
             epilogue_mask: 0,
         }
     }
@@ -1498,18 +1860,19 @@ fn build_save_mask(callee_saves_used: u32) -> u16 {
     m
 }
 
-/// Effective spill-area byte count, rounded so that the prologue
-/// leaves SP 8-byte aligned (AAPCS — needed for every `bl`/`blx` we
-/// emit). `mask`'s popcount = words pushed; combined with
-/// `spill_slots` it must be even for SP to stay 8-aligned. On real
-/// ARM1176, helpers compiled by Rust assume 8-aligned SP and will
-/// silently corrupt their stack frame otherwise; qemu doesn't catch
-/// this, which is how the bug slipped past the emulator tests.
+/// Effective frame-area byte count (spill slots + call-args region),
+/// rounded so that the prologue leaves SP 8-byte aligned (AAPCS —
+/// needed for every `bl`/`blx` we emit). `mask`'s popcount = words
+/// pushed; combined with the slot count it must be even for SP to
+/// stay 8-aligned. On real ARM1176, helpers compiled by Rust assume
+/// 8-aligned SP and will silently corrupt their stack frame otherwise;
+/// qemu doesn't catch this.
 fn aligned_spill_bytes(spill_slots: u32, mask: u16) -> u32 {
     let words_pushed = mask.count_ones();
-    let total = words_pushed + spill_slots;
-    let pad = total & 1; // 1 if odd, 0 if even
-    (spill_slots + pad) * 4
+    let total_slots = spill_slots;
+    let total = words_pushed + total_slots;
+    let pad = total & 1;
+    (total_slots + pad) * 4
 }
 
 /// Number of machine words the prologue occupies. `push {regs}` is one
@@ -1652,6 +2015,13 @@ fn size_instr(i: &Instruction) -> usize {
         | Hits | Escape
         | UartInit | UartGet8 | UartPut8 | Delay
         | ClearMonitor | GetMonitor | StopMonitor | Zero32 | Full32 => 2,
+        // Call expands inline to: ldr [r3], cmp, beq, ldr=fast, blx,
+        // b, ldr=slow, blx — 8 words.
+        Call => 8,
+        // LdrCapturePtr is a single pool ldr — same as LdrNamePtr.
+        LdrCapturePtr(..) => 1,
+        // LdrCallCachePtr is also a single pool ldr.
+        LdrCallCachePtr(..) => 1,
         // inline ops — sized to match the bodies above.
         Nullp     => 7,
         Truthy    => 11,
@@ -1674,13 +2044,34 @@ fn size_instr(i: &Instruction) -> usize {
 }
 
 fn emit_segment(seg: &LIRSegment)
-    -> (Vec<u32>, Vec<Binding>, Vec<Rc<Value>>, Vec<Rc<Name>>)
+    -> (
+        Vec<u32>,
+        Vec<Binding>,
+        Vec<Rc<Value>>,
+        Vec<Rc<Name>>,
+        Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
+    )
 {
     let mut e = Emitter::new();
 
-    // --- Prologue: save callee-saves used + LR, reserve spill slots ---
+    // Total frame slots = call_args region (bottom) + spill slots (above).
+    // The emitter tracks `call_args_max` separately so LoadSpill/StoreSpill
+    // can add its byte offset when computing their SP-relative location.
+    e.call_args_max = seg.call_args_max;
+
+    // Pre-allocate one CallCache cell per Call site in the segment.
+    // Boxed so addresses stay valid across pushes (Box's heap address
+    // is stable, unlike Vec<CallCache>'s inner buffer).
+    e.call_caches.reserve_exact(seg.call_cache_count as usize);
+    for _ in 0..seg.call_cache_count {
+        e.call_caches.push(alloc::boxed::Box::new(
+            core::cell::UnsafeCell::new(CallCache::null())));
+    }
+    let total_slots = seg.spill_slots + seg.call_args_max;
+
+    // --- Prologue: save callee-saves used + LR, reserve frame slots ---
     let prologue_mask = build_save_mask(seg.callee_saves_used);
-    let prologue_words = compute_prologue_size(seg.spill_slots, prologue_mask);
+    let prologue_words = compute_prologue_size(total_slots, prologue_mask);
 
     // --- Pass 1: per-block byte offsets ---
     let mut offset_words: usize = prologue_words;
@@ -1689,7 +2080,7 @@ fn emit_segment(seg: &LIRSegment)
         e.block_offsets.push(offset_words * 4);
         if blk.dead { continue; }
         for instr in &blk.instructions {
-            offset_words += size_instr_with_epilogue(instr, seg.spill_slots, prologue_mask);
+            offset_words += size_instr_with_epilogue(instr, total_slots, prologue_mask);
         }
     }
     let _total_code_words = offset_words;
@@ -1698,12 +2089,12 @@ fn emit_segment(seg: &LIRSegment)
     // Epilogue pops the same set of registers we pushed, but with LR
     // swapped for PC (so the popped saved-LR value lands in PC — that
     // executes the return). NOT setting both — that would overcount.
-    e.spill_slots_bytes = aligned_spill_bytes(seg.spill_slots, prologue_mask);
+    e.spill_slots_bytes = aligned_spill_bytes(total_slots, prologue_mask);
     e.epilogue_mask = (prologue_mask & !(1u16 << Register::LR.bit()))
         | (1u16 << Register::PC.bit());
 
     // Emit prologue.
-    emit_prologue(&mut e, seg.spill_slots, prologue_mask);
+    emit_prologue(&mut e, total_slots, prologue_mask);
 
     // --- Pass 2: emit ---
     for (bi, blk) in seg.blocks.iter().enumerate() {
@@ -1737,6 +2128,13 @@ fn emit_segment(seg: &LIRSegment)
                 core::ptr::addr_of!(SLOTS_BASE) as u32,
             LiteralKind::SlotBumpStaticAddr =>
                 core::ptr::addr_of!(SLOT_BUMP) as u32,
+            LiteralKind::CallCacheAddr(idx) => {
+                // Each Box<UnsafeCell<CallCache>> is heap-stable —
+                // its address remains valid for the executor's lifetime
+                // because we never move the Box out of `call_caches`.
+                let cell: &core::cell::UnsafeCell<CallCache> = &*e.call_caches[*idx as usize];
+                cell as *const _ as u32
+            }
         };
         e.code[pool_start_words + i] = word;
     }
@@ -1757,7 +2155,8 @@ fn emit_segment(seg: &LIRSegment)
     let JitOwned { captures, value_literals, name_literals } =
         collect_pinned(&e.pool_entries);
 
-    (e.code, captures, value_literals, name_literals)
+    (e.code, captures, value_literals, name_literals,
+     core::mem::take(&mut e.call_caches))
 }
 
 struct JitOwned {
@@ -1826,6 +2225,18 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             let pool_idx = e.intern_pool(LiteralKind::Name(Rc::new(n.clone())));
             e.emit_pool_load(*d, pool_idx);
         }
+        LdrCapturePtr(d, b) => {
+            // Just load the binding's literal-pool address into `d`. No
+            // deref. Used by Call as the binding_ptr arg.
+            let pool = e.intern_pool(LiteralKind::Binding(b.clone()));
+            e.emit_pool_load(*d, pool);
+        }
+        LdrCallCachePtr(d, idx) => {
+            // Load the per-call-site CallCache cell address into `d`.
+            // The pool entry resolves to `&*e.call_caches[idx]`.
+            let pool = e.intern_pool(LiteralKind::CallCacheAddr(*idx));
+            e.emit_pool_load(*d, pool);
+        }
         LdrCapture(d, b) => {
             // Materialize the capture's current value into a fresh
             // shadow slot. Sequence:
@@ -1877,11 +2288,12 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
         }
 
         LoadSpill(d, s) => {
-            let off = (s.0 as i32) * 4;
+            // Spill slots live above the call-args region: shift by it.
+            let off = ((s.0 + e.call_args_max) as i32) * 4;
             e.push(ldr_off12(*d, Register::SP, off));
         }
         StoreSpill(s, r) => {
-            let off = (s.0 as i32) * 4;
+            let off = ((s.0 + e.call_args_max) as i32) * 4;
             e.push(str_off12(*r, Register::SP, off));
         }
 
@@ -1940,6 +2352,56 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
         FullIdx   => e.emit_helper_call(fn_addr_ptr(h_array_fullidx as *const ())),
         Hits      => e.emit_helper_call(fn_addr_ptr(h_hits as *const ())),
         Escape    => e.emit_helper_call(fn_addr_ptr(h_escape as *const ())),
+
+        // Inline JC-cache dispatch. Preceding instructions have set:
+        //   r0 = binding_ptr, r1 = argc, r2 = argv (sp), r3 = cache_cell.
+        //
+        // Layout (8 words exactly — must match `size_instr`):
+        //   [w0] ldr r12, [r3]          ; r12 = cache.jc_ptr
+        //   [w1] cmp r12, #0
+        //   [w2] beq +to_slow            ; cache miss → slow path
+        //   [w3] ldr r12, =h_call_fast   ; pool load
+        //   [w4] blx r12                 ; fast dispatch
+        //   [w5] b  +to_done             ; skip slow body
+        //   [w6] ldr r12, =h_call        ; pool load (slow entry)
+        //   [w7] blx r12
+        // Done: the subsequent `Mov dst, r0` from the regalloc lowering
+        // picks up the result.
+        Call => {
+            // [w0]
+            e.push(ldr_off12(Register::R12, Register::R3, 0));
+            // [w1]
+            e.push(cmp_imm8(Register::R12, 0));
+            // [w2] beq placeholder — patched after we know slow-path offset.
+            let beq_idx = e.code.len();
+            e.push(0);
+            // [w3] ldr r12, =h_call_fast
+            let fast_pool = e.intern_pool(LiteralKind::HelperFn(
+                fn_addr_ptr(h_call_fast as *const ())));
+            e.emit_pool_load(Register::R12, fast_pool);
+            // [w4] blx r12
+            e.push(blx(Register::R12));
+            // [w5] b placeholder — patched after we know done offset.
+            let b_idx = e.code.len();
+            e.push(0);
+            // [w6] ldr r12, =h_call
+            let slow_idx = e.code.len();
+            let slow_pool = e.intern_pool(LiteralKind::HelperFn(
+                fn_addr_ptr(h_call as *const ())));
+            e.emit_pool_load(Register::R12, slow_pool);
+            // [w7] blx r12
+            e.push(blx(Register::R12));
+            let done_idx = e.code.len();
+
+            // Patch beq → slow path entry.
+            let beq_pc_byte = (beq_idx as i32) * 4;
+            let beq_target_byte = (slow_idx as i32) * 4;
+            e.code[beq_idx] = b_cond(COND_EQ, beq_target_byte - beq_pc_byte - 8);
+            // Patch b → done (just past blx r12).
+            let b_pc_byte = (b_idx as i32) * 4;
+            let b_target_byte = (done_idx as i32) * 4;
+            e.code[b_idx] = b(b_target_byte - b_pc_byte - 8);
+        }
         UartInit  => e.emit_helper_call(fn_addr_ptr(h_uart_init as *const ())),
         UartGet8  => e.emit_helper_call(fn_addr_ptr(h_uart_get8 as *const ())),
         UartPut8  => e.emit_helper_call(fn_addr_ptr(h_uart_put8 as *const ())),

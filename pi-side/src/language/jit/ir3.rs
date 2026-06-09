@@ -381,6 +381,16 @@ pub(crate) enum RIRStatement {
     /// the interpreter can reach via `set!` (already taken into account
     /// by the optimizer's escape-taint).
     Escape(VReg, VReg),
+
+    // ===================== direct call =====================
+
+    /// `mov r0, =BINDING; mov r1, r[args[0]]; … ; bl call_N; mov r[dst], r0`
+    /// where N ∈ {1,2,3}. The runtime helper resolves the binding to a
+    /// `Value::Closure`, dispatches through the executor's JC cache,
+    /// and returns the result slot id. Falls back to `evaluate()` if
+    /// the binding doesn't currently hold a Closure or types mismatch.
+    /// **Clobbers:** call-clobbered.
+    Call { dst: VReg, callee: Binding, args: alloc::vec::Vec<VReg> },
 }
 
 #[derive(Clone, Debug)]
@@ -544,6 +554,11 @@ fn lower(stmt: MIRStatement, out: &mut Vec<RIRStatement>, next_reg: &mut u32) {
         )),
 
         M::Escape(d, src) => out.push(R::Escape(d.into(), src.into())),
+
+        M::Call { dst, callee, args } => {
+            let rargs: alloc::vec::Vec<VReg> = args.into_iter().map(Into::into).collect();
+            out.push(R::Call { dst: dst.into(), callee, args: rargs });
+        }
     }
 }
 
@@ -667,6 +682,17 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &RIRStatement) -> fmt::Result {
         RIRStatement::SysFull32(r,a,b,c,d) => qua(f, "@full32", r, a, b, c, d),
 
         RIRStatement::Escape(r, src) => uno(f, "esc", r, src),
+
+        RIRStatement::Call { dst, callee, args } => {
+            mn!("call")?;
+            fmt_reg(f, dst)?;
+            write!(f, ", [#{:p}]", callee.as_ref().as_ptr())?;
+            for a in args {
+                write!(f, ", ")?;
+                fmt_reg(f, a)?;
+            }
+            Ok(())
+        }
     }
 }
 
