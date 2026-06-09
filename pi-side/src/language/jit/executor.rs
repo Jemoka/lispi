@@ -983,6 +983,26 @@ pub(crate) struct JitExecutor {
 impl JitExecutor {
     pub(crate) fn new(seg: LIRSegment) -> Self {
         let (code, captures, value_literals, name_literals) = emit_segment(&seg);
+
+        // We just wrote `code` via normal Rust stores — those land in
+        // the D-cache. With D-cache enabled (post `mmu_init`) the
+        // I-cache fetch path doesn't snoop D-cache on ARM1176, so we
+        // must clean the D-cache (and invalidate I-cache + flush
+        // prefetch buffer) once now, *not* per call. Subsequent
+        // `run()`s execute the same write-once code straight out of
+        // the I-cache.
+        unsafe {
+            core::arch::asm!(
+                "mcr p15, 0, {z}, c7, c14, 0",  // Clean+Invalidate D-cache
+                "mcr p15, 0, {z}, c7, c10, 4",  // DSB
+                "mcr p15, 0, {z}, c7, c5, 0",   // Invalidate I-cache
+                "mcr p15, 0, {z}, c7, c10, 4",  // DSB
+                "mcr p15, 0, {z}, c7, c5, 4",   // Prefetch flush (ISB)
+                z = in(reg) 0u32,
+                options(nostack, preserves_flags),
+            );
+        }
+
         JitExecutor {
             code,
             captures,
