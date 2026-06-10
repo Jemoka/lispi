@@ -13,7 +13,9 @@ extern "C" fn __kernel_start() -> ! {
     // *before* any non-trivial Rust code runs. After this, the D-cache
     // is hot for .text/.bss/heap/stack, MMIO at 0x2000_0000 stays
     // device-typed (so the existing volatile UART writes keep working).
-    unsafe { crate::utils::memory::mmu_init(); }
+    unsafe {
+        crate::utils::memory::mmu_init();
+    }
     crate::boot::entrypoint::entrypoint();
     crate::utils::watchdog::restart();
 }

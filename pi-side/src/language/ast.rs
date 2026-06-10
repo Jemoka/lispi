@@ -4,10 +4,10 @@ use alloc::rc::Rc;
 use alloc::string::String as AllocString;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::cell::RefCell;
 use core::fmt;
 use heapless::String;
-use core::cell::Cell;
 
 use super::constants::SYMB_NAME_LEN;
 use super::environment;

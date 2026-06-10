@@ -2,11 +2,11 @@ pub mod ast;
 pub mod constants;
 pub mod environment;
 pub mod execute;
+pub mod jit;
 pub mod number;
 pub mod parse;
 pub mod special;
 pub mod syscalls;
-pub mod jit;
 
 pub use environment::Image;
 pub use execute::evaluate;

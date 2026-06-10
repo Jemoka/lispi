@@ -77,9 +77,7 @@ impl Number {
             }
             (Number::Addr(a), Number::Integer(b)) => Ok(Number::Addr(a.wrapping_add(b as usize))),
             (Number::Integer(a), Number::Addr(b)) => Ok(Number::Addr((a as usize).wrapping_add(b))),
-            (Number::Addr(a), Number::Unsigned(b)) => {
-                Ok(Number::Addr(a.wrapping_add(b as usize)))
-            }
+            (Number::Addr(a), Number::Unsigned(b)) => Ok(Number::Addr(a.wrapping_add(b as usize))),
             (Number::Unsigned(a), Number::Addr(b)) => {
                 Ok(Number::Addr((a as usize).wrapping_add(b)))
             }
@@ -99,9 +97,7 @@ impl Number {
                 Ok(Number::Unsigned((a as u32).wrapping_sub(b)))
             }
             (Number::Addr(a), Number::Integer(b)) => Ok(Number::Addr(a.wrapping_sub(b as usize))),
-            (Number::Addr(a), Number::Unsigned(b)) => {
-                Ok(Number::Addr(a.wrapping_sub(b as usize)))
-            }
+            (Number::Addr(a), Number::Unsigned(b)) => Ok(Number::Addr(a.wrapping_sub(b as usize))),
             (Number::Addr(a), Number::Addr(b)) => Ok(Number::Integer(a.wrapping_sub(b) as i32)),
             (Number::Integer(_), Number::Addr(_)) | (Number::Unsigned(_), Number::Addr(_)) => {
                 Err("Cannot subtract address from integer.")
@@ -198,9 +194,13 @@ impl Number {
     pub fn lshift(self, other: Number) -> Result<Number, &'static str> {
         match (self, other) {
             (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot shift addresses."),
-            (Number::Integer(a), Number::Integer(b)) => Ok(Number::Integer(a.wrapping_shl(b as u32))),
+            (Number::Integer(a), Number::Integer(b)) => {
+                Ok(Number::Integer(a.wrapping_shl(b as u32)))
+            }
             (Number::Unsigned(a), Number::Unsigned(b)) => Ok(Number::Unsigned(a.wrapping_shl(b))),
-            (Number::Unsigned(a), Number::Integer(b)) => Ok(Number::Unsigned(a.wrapping_shl(b as u32))),
+            (Number::Unsigned(a), Number::Integer(b)) => {
+                Ok(Number::Unsigned(a.wrapping_shl(b as u32)))
+            }
             (Number::Integer(a), Number::Unsigned(b)) => Ok(Number::Integer(a.wrapping_shl(b))),
         }
     }
@@ -209,9 +209,13 @@ impl Number {
     pub fn rshift(self, other: Number) -> Result<Number, &'static str> {
         match (self, other) {
             (Number::Addr(_), _) | (_, Number::Addr(_)) => Err("Cannot shift addresses."),
-            (Number::Integer(a), Number::Integer(b)) => Ok(Number::Integer(a.wrapping_shr(b as u32))),
+            (Number::Integer(a), Number::Integer(b)) => {
+                Ok(Number::Integer(a.wrapping_shr(b as u32)))
+            }
             (Number::Unsigned(a), Number::Unsigned(b)) => Ok(Number::Unsigned(a.wrapping_shr(b))),
-            (Number::Unsigned(a), Number::Integer(b)) => Ok(Number::Unsigned(a.wrapping_shr(b as u32))),
+            (Number::Unsigned(a), Number::Integer(b)) => {
+                Ok(Number::Unsigned(a.wrapping_shr(b as u32)))
+            }
             (Number::Integer(a), Number::Unsigned(b)) => Ok(Number::Integer(a.wrapping_shr(b))),
         }
     }
@@ -253,12 +257,8 @@ impl PartialOrd for Number {
             (Number::Unsigned(a), Number::Unsigned(b)) => a.partial_cmp(b),
             (Number::Addr(a), Number::Addr(b)) => a.partial_cmp(b),
             // unsigned/int: compare as i64 to handle sign correctly
-            (Number::Unsigned(a), Number::Integer(b)) => {
-                (*a as i64).partial_cmp(&(*b as i64))
-            }
-            (Number::Integer(a), Number::Unsigned(b)) => {
-                (*a as i64).partial_cmp(&(*b as i64))
-            }
+            (Number::Unsigned(a), Number::Integer(b)) => (*a as i64).partial_cmp(&(*b as i64)),
+            (Number::Integer(a), Number::Unsigned(b)) => (*a as i64).partial_cmp(&(*b as i64)),
             // addr vs int: incomparable
             _ => None,
         }

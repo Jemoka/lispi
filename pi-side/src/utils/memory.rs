@@ -113,30 +113,44 @@ pub unsafe fn mmu_init() {
     let table_addr = tbl.entries.as_ptr() as u32;
 
     // 2. Point TTBR0 at the table.
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c2, c0, 0", in(reg) table_addr); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c2, c0, 0", in(reg) table_addr);
+    }
 
     // 3. TTBCR=0 → always use TTBR0 (no split address space).
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c2, c0, 2", in(reg) 0u32); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c2, c0, 2", in(reg) 0u32);
+    }
 
     // 4. DACR: all 16 domains = Manager (0b11 × 16 = 0xFFFFFFFF) so
     //    AP bits are effectively bypassed.
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c3, c0, 0", in(reg) 0xFFFFFFFFu32); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c3, c0, 0", in(reg) 0xFFFFFFFFu32);
+    }
 
     // 5. Invalidate the entire TLB so any stale boot entries can't
     //    shadow our identity map.
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c8, c7, 0", in(reg) 0u32); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c8, c7, 0", in(reg) 0u32);
+    }
 
     // 6. SCTLR: enable MMU (bit 0) and D-cache (bit 2). I-cache (bit
     //    12) was already turned on in boot.
     let mut sctlr: u32;
-    unsafe { core::arch::asm!("mrc p15, 0, {0}, c1, c0, 0", out(reg) sctlr); }
+    unsafe {
+        core::arch::asm!("mrc p15, 0, {0}, c1, c0, 0", out(reg) sctlr);
+    }
     sctlr |= 1 << 0;
     sctlr |= 1 << 2;
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c1, c0, 0", in(reg) sctlr); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c1, c0, 0", in(reg) sctlr);
+    }
 
     // 7. Prefetch flush so subsequent instruction fetches use the new
     //    translation regime.
-    unsafe { core::arch::asm!("mcr p15, 0, {0}, c7, c5, 4", in(reg) 0u32); }
+    unsafe {
+        core::arch::asm!("mcr p15, 0, {0}, c7, c5, 4", in(reg) 0u32);
+    }
 }
 
 //// barriers ////

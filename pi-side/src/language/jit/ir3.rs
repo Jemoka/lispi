@@ -40,20 +40,28 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::language::ast::Value;
-use crate::language::environment::Binding;
-use crate::language::number::Number;
 use super::ir::Name;
 use super::ir2::{HeapReg, ImmReg, MIRSegment, MIRStatement};
 use super::scope::LocalId;
+use crate::language::ast::Value;
+use crate::language::environment::Binding;
+use crate::language::number::Number;
 
 /// Single-namespace register, same shape as `VReg` in the SSA IR but
 /// living in MIR's unified pool (ImmReg/HeapReg IDs after optimize2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VReg(pub(super) u32);
 
-impl From<ImmReg> for VReg { fn from(r: ImmReg) -> Self { VReg(r.0) } }
-impl From<HeapReg> for VReg { fn from(r: HeapReg) -> Self { VReg(r.0) } }
+impl From<ImmReg> for VReg {
+    fn from(r: ImmReg) -> Self {
+        VReg(r.0)
+    }
+}
+impl From<HeapReg> for VReg {
+    fn from(r: HeapReg) -> Self {
+        VReg(r.0)
+    }
+}
 
 /// 32-bit immediate payload, tagged by source numeric type for the
 /// pretty-printer and any downstream coercion checks. At asm-emit time
@@ -73,9 +81,9 @@ impl ImmNumber {
     /// to a `MovImmAddr` (heap-pointer load) in that case.
     fn from_value(v: &Value) -> Option<Self> {
         match v {
-            Value::Number(Number::Integer(i))  => Some(ImmNumber::Integer(*i)),
+            Value::Number(Number::Integer(i)) => Some(ImmNumber::Integer(*i)),
             Value::Number(Number::Unsigned(u)) => Some(ImmNumber::Unsigned(*u)),
-            Value::Number(Number::Addr(a))     => Some(ImmNumber::Addr(*a)),
+            Value::Number(Number::Addr(a)) => Some(ImmNumber::Addr(*a)),
             // Bool collapses to Integer 0/1 — fits an immediate slot.
             Value::Bool(b) => Some(ImmNumber::Integer(if *b { 1 } else { 0 })),
             _ => None,
@@ -86,9 +94,9 @@ impl ImmNumber {
 impl fmt::Display for ImmNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ImmNumber::Integer(i)  => write!(f, "{}i", i),
+            ImmNumber::Integer(i) => write!(f, "{}i", i),
             ImmNumber::Unsigned(u) => write!(f, "{}u", u),
-            ImmNumber::Addr(a)     => write!(f, "{:#x}a", a),
+            ImmNumber::Addr(a) => write!(f, "{:#x}a", a),
         }
     }
 }
@@ -96,7 +104,6 @@ impl fmt::Display for ImmNumber {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RIRStatement {
     // ===================== loads =====================
-
     /// `mov r[dst], #imm` (or a literal-pool load if `imm` doesn't fit
     /// the encoding). Replaces ir2's `LoadValueImm` for `Number`/`Bool`.
     /// **Clobbers:** `r[dst]`.
@@ -109,7 +116,6 @@ pub(crate) enum RIRStatement {
     MovImmAddr(VReg, Value),
 
     // ===================== runtime scope management =====================
-
     /// `bl push_frame_trampoline` — pushes an empty owned frame onto
     /// the runtime Image. Marks entry to a `let` scope.
     /// **Clobbers:** call-clobbered (r0–r3, r12, lr, flags).
@@ -123,14 +129,22 @@ pub(crate) enum RIRStatement {
     /// — write `locals[id]`'s inner value from src and register
     /// `(name → locals[id])` in the top runtime frame.
     /// **Clobbers:** call-clobbered.
-    BindLocal { name: Name, id: LocalId, src: VReg },
+    BindLocal {
+        name: Name,
+        id: LocalId,
+        src: VReg,
+    },
 
     /// `mov r0, #<src>; mov r1, #<id>; ldr r2, =NAME; bl bind_local`
     /// — same as `BindLocal` but the value is inlined as an immediate.
     /// MIR `BindImmediate` with non-Number/non-Bool src demotes during
     /// conversion to `MovImmAddr` + `BindLocal`.
     /// **Clobbers:** call-clobbered.
-    BindImmediate { name: Name, id: LocalId, src: ImmNumber },
+    BindImmediate {
+        name: Name,
+        id: LocalId,
+        src: ImmNumber,
+    },
 
     /// `mov r0, #<id>; bl load_local; mov r[dst], r0` — fetch the
     /// current heap-boxed value out of `locals[id]`.
@@ -153,7 +167,6 @@ pub(crate) enum RIRStatement {
     StoreCapture(Binding, VReg),
 
     // ===================== casts =====================
-
     /// `ldr r[dst], [r[src], #PAYLOAD_OFFSET]` — read the 32-bit
     /// payload word out of a boxed `Value::Number` cell.
     /// **Clobbers:** `r[dst]`.
@@ -182,7 +195,6 @@ pub(crate) enum RIRStatement {
     // All operands are 32-bit imm-shaped (i.e., live in a general
     // register without indirection). Three-address ARM forms map
     // directly. **Clobbers:** `r[dst]`, condition flags.
-
     /// `add r[dst], r[a], r[b]`
     Add(VReg, VReg, VReg),
     /// `sub r[dst], r[a], r[b]`
@@ -202,7 +214,6 @@ pub(crate) enum RIRStatement {
     Rshift(VReg, VReg, VReg),
 
     // ===================== bitwise =====================
-
     /// `mvn r[dst], r[src]`
     /// **Clobbers:** `r[dst]`.
     BinNot(VReg, VReg),
@@ -214,7 +225,6 @@ pub(crate) enum RIRStatement {
     BinAnd(VReg, VReg, VReg),
 
     // ===================== logical (eager) =====================
-
     /// Per-tag-type `not`, matching the interpreter's rules. Easiest
     /// path: `mov r0, r[src]; bl lognot; mov r[dst], r0`.
     /// **Clobbers:** call-clobbered.
@@ -228,7 +238,6 @@ pub(crate) enum RIRStatement {
     //
     // Pattern: `cmp r[a], r[b]; movXX r[dst], #1; movYY r[dst], #0`
     // (XX/YY chosen per relation). **Clobbers:** `r[dst]`, flags.
-
     Eq(VReg, VReg, VReg),
     Gt(VReg, VReg, VReg),
     Lt(VReg, VReg, VReg),
@@ -242,13 +251,11 @@ pub(crate) enum RIRStatement {
     // The Box that wraps the final result picks the right Number variant.
     //   `mov r[dst], r[src]`
     // **Clobbers:** `r[dst]`.
-
     AsAddr(VReg, VReg),
     AsSigned(VReg, VReg),
     AsUnsigned(VReg, VReg),
 
     // ===================== cons / list =====================
-
     /// `mov r0, r[a]; mov r1, r[b]; bl cons_alloc; mov r[dst], r0`
     /// **Clobbers:** call-clobbered.
     Cons(VReg, VReg, VReg),
@@ -264,7 +271,6 @@ pub(crate) enum RIRStatement {
     Nullp(VReg, VReg),
 
     // ===================== arrays =====================
-
     /// `mov r0, r[src]; bl array_pack; mov r[dst], r0`
     /// **Clobbers:** call-clobbered.
     Array(VReg, VReg),
@@ -292,7 +298,6 @@ pub(crate) enum RIRStatement {
     FullIdx(VReg, VReg, VReg, VReg, VReg),
 
     // ===================== introspection =====================
-
     /// `ldr r[dst], [r[src], #HITS_OFFSET]` — read closure/macro hit
     /// counter as Unsigned. (Assumes Closure layout exposes `hits` at
     /// a known offset within the Rc<Closure>.)
@@ -300,7 +305,6 @@ pub(crate) enum RIRStatement {
     Hits(VReg, VReg),
 
     // ===================== control flow =====================
-
     /// `b .L<target>` — unconditional branch.
     /// **Clobbers:** none.
     Br(usize),
@@ -308,7 +312,11 @@ pub(crate) enum RIRStatement {
     /// `cmp r[cond], #0; beq .L<else>; b .L<then>` — cond is a 0/1
     /// produced by `Truthy` or an `eq/gt/…` comparison.
     /// **Clobbers:** flags.
-    CondBr { cond: VReg, then_blk: usize, else_blk: usize },
+    CondBr {
+        cond: VReg,
+        then_blk: usize,
+        else_blk: usize,
+    },
 
     /// SSA phi. Lowered by a post-pass copy-insertion to register moves
     /// at each predecessor's tail (just before its terminator). After
@@ -328,7 +336,6 @@ pub(crate) enum RIRStatement {
     // The JIT specializes these so they can lower to inline asm rather
     // than going through the SWI trampoline. Each comment lists the
     // moral instruction sequence; helper calls are flagged.
-
     /// `dsb sy`
     /// **Clobbers:** memory-ordering effect only.
     SysDsb(VReg),
@@ -368,13 +375,15 @@ pub(crate) enum RIRStatement {
     /// `bl zero32` (memset-shaped fill of 0).
     /// **Clobbers:** call-clobbered.
     SysZero32(VReg, VReg, VReg, VReg),
+    /// `bl/inline str` (copy array contents to destination).
+    /// **Clobbers:** call-clobbered/scratch.
+    SysStr(VReg, VReg, VReg, VReg),
 
     /// `bl full32` (memset-shaped fill of `val`).
     /// **Clobbers:** call-clobbered.
     SysFull32(VReg, VReg, VReg, VReg, VReg),
 
     // ===================== escape =====================
-
     /// `mov r0, r[src]; bl escape_to_interp; mov r[dst], r0` — bail
     /// out into the interpreter for an arbitrary sexp evaluation.
     /// **Clobbers:** call-clobbered — and conceptually any local slot
@@ -383,14 +392,17 @@ pub(crate) enum RIRStatement {
     Escape(VReg, VReg),
 
     // ===================== direct call =====================
-
     /// `mov r0, =BINDING; mov r1, r[args[0]]; … ; bl call_N; mov r[dst], r0`
     /// where N ∈ {1,2,3}. The runtime helper resolves the binding to a
     /// `Value::Closure`, dispatches through the executor's JC cache,
     /// and returns the result slot id. Falls back to `evaluate()` if
     /// the binding doesn't currently hold a Closure or types mismatch.
     /// **Clobbers:** call-clobbered.
-    Call { dst: VReg, callee: Binding, args: alloc::vec::Vec<VReg> },
+    Call {
+        dst: VReg,
+        callee: Binding,
+        args: alloc::vec::Vec<VReg>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -423,7 +435,10 @@ impl From<MIRSegment> for RIRSegment {
             for stmt in b.statements {
                 lower(stmt, &mut out, &mut next_reg);
             }
-            blocks.push(RIRBasicBlock { statements: out, dead: b.dead });
+            blocks.push(RIRBasicBlock {
+                statements: out,
+                dead: b.dead,
+            });
         }
 
         RIRSegment { blocks }
@@ -441,19 +456,19 @@ fn lower(stmt: MIRStatement, out: &mut Vec<RIRStatement>, next_reg: &mut u32) {
     use MIRStatement as M;
     use RIRStatement as R;
     match stmt {
-        M::LoadValueImm(d, v) => {
-            match ImmNumber::from_value(&v) {
-                Some(imm) => out.push(R::MovImm(d.into(), imm)),
-                None => out.push(R::MovImmAddr(d.into(), v)),
-            }
-        }
+        M::LoadValueImm(d, v) => match ImmNumber::from_value(&v) {
+            Some(imm) => out.push(R::MovImm(d.into(), imm)),
+            None => out.push(R::MovImmAddr(d.into(), v)),
+        },
         M::LoadValuePtr(d, v) => out.push(R::MovImmAddr(d.into(), v)),
 
         M::PushFrame => out.push(R::PushFrame),
-        M::PopFrame  => out.push(R::PopFrame),
+        M::PopFrame => out.push(R::PopFrame),
 
         M::BindLocal { name, id, src } => out.push(R::BindLocal {
-            name, id, src: src.into(),
+            name,
+            id,
+            src: src.into(),
         }),
         M::BindImmediate { name, id, src } => {
             match ImmNumber::from_value(&src) {
@@ -463,101 +478,123 @@ fn lower(stmt: MIRStatement, out: &mut Vec<RIRStatement>, next_reg: &mut u32) {
                     let fresh = VReg(*next_reg);
                     *next_reg += 1;
                     out.push(R::MovImmAddr(fresh, src));
-                    out.push(R::BindLocal { name, id, src: fresh });
+                    out.push(R::BindLocal {
+                        name,
+                        id,
+                        src: fresh,
+                    });
                 }
             }
         }
 
-        M::LoadLocal(d, id)   => out.push(R::LoadLocal(d.into(), id)),
-        M::LoadCapture(d, b)  => out.push(R::LoadCapture(d.into(), b)),
-        M::StoreLocal(id, r)  => out.push(R::StoreLocal(id, r.into())),
+        M::LoadLocal(d, id) => out.push(R::LoadLocal(d.into(), id)),
+        M::LoadCapture(d, b) => out.push(R::LoadCapture(d.into(), b)),
+        M::StoreLocal(id, r) => out.push(R::StoreLocal(id, r.into())),
         M::StoreCapture(b, r) => out.push(R::StoreCapture(b, r.into())),
 
-        M::Unbox(i, h)       => out.push(R::Unbox(i.into(), h.into())),
-        M::Box(i, h)         => out.push(R::Box(i.into(), h.into())),
-        M::Truthy(i, h)      => out.push(R::Truthy(i.into(), h.into())),
+        M::Unbox(i, h) => out.push(R::Unbox(i.into(), h.into())),
+        M::Box(i, h) => out.push(R::Box(i.into(), h.into())),
+        M::Truthy(i, h) => out.push(R::Truthy(i.into(), h.into())),
         M::UnboxLocal(i, id) => out.push(R::UnboxLocal(i.into(), id)),
 
-        M::Add(d, a, b)    => out.push(R::Add(d.into(), a.into(), b.into())),
-        M::Sub(d, a, b)    => out.push(R::Sub(d.into(), a.into(), b.into())),
-        M::Mul(d, a, b)    => out.push(R::Mul(d.into(), a.into(), b.into())),
-        M::Div(d, a, b)    => out.push(R::Div(d.into(), a.into(), b.into())),
-        M::Mod(d, a, b)    => out.push(R::Mod(d.into(), a.into(), b.into())),
+        M::Add(d, a, b) => out.push(R::Add(d.into(), a.into(), b.into())),
+        M::Sub(d, a, b) => out.push(R::Sub(d.into(), a.into(), b.into())),
+        M::Mul(d, a, b) => out.push(R::Mul(d.into(), a.into(), b.into())),
+        M::Div(d, a, b) => out.push(R::Div(d.into(), a.into(), b.into())),
+        M::Mod(d, a, b) => out.push(R::Mod(d.into(), a.into(), b.into())),
         M::Lshift(d, a, b) => out.push(R::Lshift(d.into(), a.into(), b.into())),
         M::Rshift(d, a, b) => out.push(R::Rshift(d.into(), a.into(), b.into())),
 
-        M::BinNot(d, a)    => out.push(R::BinNot(d.into(), a.into())),
-        M::BinOr(d, a, b)  => out.push(R::BinOr(d.into(), a.into(), b.into())),
+        M::BinNot(d, a) => out.push(R::BinNot(d.into(), a.into())),
+        M::BinOr(d, a, b) => out.push(R::BinOr(d.into(), a.into(), b.into())),
         M::BinAnd(d, a, b) => out.push(R::BinAnd(d.into(), a.into(), b.into())),
 
         M::LogNot(d, a) => out.push(R::LogNot(d.into(), a.into())),
         M::Xor(d, a, b) => out.push(R::Xor(d.into(), a.into(), b.into())),
 
-        M::Eq(d, a, b)  => out.push(R::Eq(d.into(), a.into(), b.into())),
-        M::Gt(d, a, b)  => out.push(R::Gt(d.into(), a.into(), b.into())),
-        M::Lt(d, a, b)  => out.push(R::Lt(d.into(), a.into(), b.into())),
+        M::Eq(d, a, b) => out.push(R::Eq(d.into(), a.into(), b.into())),
+        M::Gt(d, a, b) => out.push(R::Gt(d.into(), a.into(), b.into())),
+        M::Lt(d, a, b) => out.push(R::Lt(d.into(), a.into(), b.into())),
         M::Gte(d, a, b) => out.push(R::Gte(d.into(), a.into(), b.into())),
         M::Lte(d, a, b) => out.push(R::Lte(d.into(), a.into(), b.into())),
 
-        M::AsAddr(d, a)     => out.push(R::AsAddr(d.into(), a.into())),
-        M::AsSigned(d, a)   => out.push(R::AsSigned(d.into(), a.into())),
+        M::AsAddr(d, a) => out.push(R::AsAddr(d.into(), a.into())),
+        M::AsSigned(d, a) => out.push(R::AsSigned(d.into(), a.into())),
         M::AsUnsigned(d, a) => out.push(R::AsUnsigned(d.into(), a.into())),
 
         M::Cons(d, a, b) => out.push(R::Cons(d.into(), a.into(), b.into())),
-        M::Car(d, a)     => out.push(R::Car(d.into(), a.into())),
-        M::Cdr(d, a)     => out.push(R::Cdr(d.into(), a.into())),
-        M::Nullp(d, a)   => out.push(R::Nullp(d.into(), a.into())),
+        M::Car(d, a) => out.push(R::Car(d.into(), a.into())),
+        M::Cdr(d, a) => out.push(R::Cdr(d.into(), a.into())),
+        M::Nullp(d, a) => out.push(R::Nullp(d.into(), a.into())),
 
-        M::Array(d, a)            => out.push(R::Array(d.into(), a.into())),
-        M::Full(d, a, b)          => out.push(R::Full(d.into(), a.into(), b.into())),
-        M::Unpack(d, a)           => out.push(R::Unpack(d.into(), a.into())),
-        M::GetIdx(d, a, b)        => out.push(R::GetIdx(d.into(), a.into(), b.into())),
-        M::PutIdx(d, t, i, v)     => out.push(R::PutIdx(d.into(), t.into(), i.into(), v.into())),
-        M::ReadIdx(d, t, o, n)    => out.push(R::ReadIdx(d.into(), t.into(), o.into(), n.into())),
-        M::FillIdx(d, t, o, l)    => out.push(R::FillIdx(d.into(), t.into(), o.into(), l.into())),
-        M::FullIdx(d, t, o, n, v) => out.push(R::FullIdx(d.into(), t.into(), o.into(), n.into(), v.into())),
+        M::Array(d, a) => out.push(R::Array(d.into(), a.into())),
+        M::Full(d, a, b) => out.push(R::Full(d.into(), a.into(), b.into())),
+        M::Unpack(d, a) => out.push(R::Unpack(d.into(), a.into())),
+        M::GetIdx(d, a, b) => out.push(R::GetIdx(d.into(), a.into(), b.into())),
+        M::PutIdx(d, t, i, v) => out.push(R::PutIdx(d.into(), t.into(), i.into(), v.into())),
+        M::ReadIdx(d, t, o, n) => out.push(R::ReadIdx(d.into(), t.into(), o.into(), n.into())),
+        M::FillIdx(d, t, o, l) => out.push(R::FillIdx(d.into(), t.into(), o.into(), l.into())),
+        M::FullIdx(d, t, o, n, v) => {
+            out.push(R::FullIdx(d.into(), t.into(), o.into(), n.into(), v.into()))
+        }
 
         M::Hits(d, a) => out.push(R::Hits(d.into(), a.into())),
 
         M::Br(t) => out.push(R::Br(t)),
-        M::CondBr { cond, then_blk, else_blk } => out.push(R::CondBr {
-            cond: cond.into(), then_blk, else_blk,
+        M::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => out.push(R::CondBr {
+            cond: cond.into(),
+            then_blk,
+            else_blk,
         }),
 
-        M::PhiOpImm(d, (pa, va), (pb, vb)) => out.push(R::PhiOp(
-            d.into(), (pa, va.into()), (pb, vb.into()),
-        )),
-        M::PhiOpHeap(d, (pa, va), (pb, vb)) => out.push(R::PhiOp(
-            d.into(), (pa, va.into()), (pb, vb.into()),
-        )),
+        M::PhiOpImm(d, (pa, va), (pb, vb)) => {
+            out.push(R::PhiOp(d.into(), (pa, va.into()), (pb, vb.into())))
+        }
+        M::PhiOpHeap(d, (pa, va), (pb, vb)) => {
+            out.push(R::PhiOp(d.into(), (pa, va.into()), (pb, vb.into())))
+        }
 
         M::Ret(r) => out.push(R::Ret(r.into())),
 
-        M::SysDsb(d)           => out.push(R::SysDsb(d.into())),
+        M::SysDsb(d) => out.push(R::SysDsb(d.into())),
         M::SysPrefetchFlush(d) => out.push(R::SysPrefetchFlush(d.into())),
-        M::SysUartInit(d)      => out.push(R::SysUartInit(d.into())),
-        M::SysUartGet8(d)      => out.push(R::SysUartGet8(d.into())),
-        M::SysClearMonitor(d)  => out.push(R::SysClearMonitor(d.into())),
-        M::SysGetMonitor(d)    => out.push(R::SysGetMonitor(d.into())),
-        M::SysStopMonitor(d)   => out.push(R::SysStopMonitor(d.into())),
+        M::SysUartInit(d) => out.push(R::SysUartInit(d.into())),
+        M::SysUartGet8(d) => out.push(R::SysUartGet8(d.into())),
+        M::SysClearMonitor(d) => out.push(R::SysClearMonitor(d.into())),
+        M::SysGetMonitor(d) => out.push(R::SysGetMonitor(d.into())),
+        M::SysStopMonitor(d) => out.push(R::SysStopMonitor(d.into())),
 
-        M::SysGet32(d, a)    => out.push(R::SysGet32(d.into(), a.into())),
+        M::SysGet32(d, a) => out.push(R::SysGet32(d.into(), a.into())),
         M::SysUartPut8(d, a) => out.push(R::SysUartPut8(d.into(), a.into())),
-        M::SysDelay(d, a)    => out.push(R::SysDelay(d.into(), a.into())),
+        M::SysDelay(d, a) => out.push(R::SysDelay(d.into(), a.into())),
 
         M::SysPut32(d, a, b) => out.push(R::SysPut32(d.into(), a.into(), b.into())),
 
         M::SysZero32(d, a, b, c) => out.push(R::SysZero32(d.into(), a.into(), b.into(), c.into())),
 
+        M::SysStr(d, a, b, c) => out.push(R::SysStr(d.into(), a.into(), b.into(), c.into())),
+
         M::SysFull32(d, a, b, c, e) => out.push(R::SysFull32(
-            d.into(), a.into(), b.into(), c.into(), e.into(),
+            d.into(),
+            a.into(),
+            b.into(),
+            c.into(),
+            e.into(),
         )),
 
         M::Escape(d, src) => out.push(R::Escape(d.into(), src.into())),
 
         M::Call { dst, callee, args } => {
             let rargs: alloc::vec::Vec<VReg> = args.into_iter().map(Into::into).collect();
-            out.push(R::Call { dst: dst.into(), callee, args: rargs });
+            out.push(R::Call {
+                dst: dst.into(),
+                callee,
+                args: rargs,
+            });
         }
     }
 }
@@ -579,107 +616,166 @@ fn fmt_blk(f: &mut fmt::Formatter<'_>, b: usize) -> fmt::Result {
 
 fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &RIRStatement) -> fmt::Result {
     const W: usize = 7;
-    macro_rules! mn { ($m:expr) => { write!(f, "{:<width$}", $m, width = W) }; }
+    macro_rules! mn {
+        ($m:expr) => {
+            write!(f, "{:<width$}", $m, width = W)
+        };
+    }
 
     match s {
-        RIRStatement::MovImm(r, n)    => { mn!("mov")?;  fmt_reg(f, r)?; write!(f, ", #{}", n) }
-        RIRStatement::MovImmAddr(r, v) => { mn!("ldr=")?; fmt_reg(f, r)?; write!(f, ", #{}", v) }
+        RIRStatement::MovImm(r, n) => {
+            mn!("mov")?;
+            fmt_reg(f, r)?;
+            write!(f, ", #{}", n)
+        }
+        RIRStatement::MovImmAddr(r, v) => {
+            mn!("ldr=")?;
+            fmt_reg(f, r)?;
+            write!(f, ", #{}", v)
+        }
 
         RIRStatement::PushFrame => mn!("pushf"),
-        RIRStatement::PopFrame  => mn!("popf"),
+        RIRStatement::PopFrame => mn!("popf"),
 
         RIRStatement::BindLocal { name, id, src } => {
             mn!("bnd")?;
-            fmt_local(f, id)?; write!(f, ", ")?; fmt_reg(f, src)?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_reg(f, src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
         RIRStatement::BindImmediate { name, id, src } => {
             mn!("bim")?;
-            fmt_local(f, id)?; write!(f, ", #{}", src)?;
+            fmt_local(f, id)?;
+            write!(f, ", #{}", src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
 
-        RIRStatement::LoadLocal(r, id)   => { mn!("ldl")?; fmt_reg(f, r)?; write!(f, ", ")?; fmt_local(f, id) }
-        RIRStatement::LoadCapture(r, b)  => { mn!("ldc")?; fmt_reg(f, r)?; write!(f, ", ")?; fmt_binding(f, b) }
-        RIRStatement::StoreLocal(id, r)  => { mn!("stl")?; fmt_local(f, id)?; write!(f, ", ")?; fmt_reg(f, r) }
-        RIRStatement::StoreCapture(b, r) => { mn!("stc")?; fmt_binding(f, b)?; write!(f, ", ")?; fmt_reg(f, r) }
-
-        RIRStatement::Unbox(d, s)      => uno(f, "ubox",  d, s),
-        RIRStatement::Box(s, d)        => uno(f, "box",   s, d),
-        RIRStatement::Truthy(d, s)     => uno(f, "trth",  d, s),
-        RIRStatement::UnboxLocal(d, id) => {
-            mn!("uboxl")?; fmt_reg(f, d)?; write!(f, ", ")?; fmt_local(f, id)
+        RIRStatement::LoadLocal(r, id) => {
+            mn!("ldl")?;
+            fmt_reg(f, r)?;
+            write!(f, ", ")?;
+            fmt_local(f, id)
+        }
+        RIRStatement::LoadCapture(r, b) => {
+            mn!("ldc")?;
+            fmt_reg(f, r)?;
+            write!(f, ", ")?;
+            fmt_binding(f, b)
+        }
+        RIRStatement::StoreLocal(id, r) => {
+            mn!("stl")?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_reg(f, r)
+        }
+        RIRStatement::StoreCapture(b, r) => {
+            mn!("stc")?;
+            fmt_binding(f, b)?;
+            write!(f, ", ")?;
+            fmt_reg(f, r)
         }
 
-        RIRStatement::Add(r,a,b)    => bin(f, "add",  r, a, b),
-        RIRStatement::Sub(r,a,b)    => bin(f, "sub",  r, a, b),
-        RIRStatement::Mul(r,a,b)    => bin(f, "mul",  r, a, b),
-        RIRStatement::Div(r,a,b)    => bin(f, "div",  r, a, b),
-        RIRStatement::Mod(r,a,b)    => bin(f, "mod",  r, a, b),
-        RIRStatement::Lshift(r,a,b) => bin(f, "lsl",  r, a, b),
-        RIRStatement::Rshift(r,a,b) => bin(f, "lsr",  r, a, b),
+        RIRStatement::Unbox(d, s) => uno(f, "ubox", d, s),
+        RIRStatement::Box(s, d) => uno(f, "box", s, d),
+        RIRStatement::Truthy(d, s) => uno(f, "trth", d, s),
+        RIRStatement::UnboxLocal(d, id) => {
+            mn!("uboxl")?;
+            fmt_reg(f, d)?;
+            write!(f, ", ")?;
+            fmt_local(f, id)
+        }
 
-        RIRStatement::BinNot(r,a)   => uno(f, "bnot", r, a),
-        RIRStatement::BinOr(r,a,b)  => bin(f, "bor",  r, a, b),
-        RIRStatement::BinAnd(r,a,b) => bin(f, "band", r, a, b),
+        RIRStatement::Add(r, a, b) => bin(f, "add", r, a, b),
+        RIRStatement::Sub(r, a, b) => bin(f, "sub", r, a, b),
+        RIRStatement::Mul(r, a, b) => bin(f, "mul", r, a, b),
+        RIRStatement::Div(r, a, b) => bin(f, "div", r, a, b),
+        RIRStatement::Mod(r, a, b) => bin(f, "mod", r, a, b),
+        RIRStatement::Lshift(r, a, b) => bin(f, "lsl", r, a, b),
+        RIRStatement::Rshift(r, a, b) => bin(f, "lsr", r, a, b),
 
-        RIRStatement::LogNot(r,a) => uno(f, "lnot", r, a),
-        RIRStatement::Xor(r,a,b)  => bin(f, "xor",  r, a, b),
+        RIRStatement::BinNot(r, a) => uno(f, "bnot", r, a),
+        RIRStatement::BinOr(r, a, b) => bin(f, "bor", r, a, b),
+        RIRStatement::BinAnd(r, a, b) => bin(f, "band", r, a, b),
 
-        RIRStatement::Eq(r,a,b)  => bin(f, "eq",  r, a, b),
-        RIRStatement::Gt(r,a,b)  => bin(f, "gt",  r, a, b),
-        RIRStatement::Lt(r,a,b)  => bin(f, "lt",  r, a, b),
-        RIRStatement::Gte(r,a,b) => bin(f, "gte", r, a, b),
-        RIRStatement::Lte(r,a,b) => bin(f, "lte", r, a, b),
+        RIRStatement::LogNot(r, a) => uno(f, "lnot", r, a),
+        RIRStatement::Xor(r, a, b) => bin(f, "xor", r, a, b),
 
-        RIRStatement::AsAddr(r,a)     => uno(f, "tadr", r, a),
-        RIRStatement::AsSigned(r,a)   => uno(f, "tsig", r, a),
-        RIRStatement::AsUnsigned(r,a) => uno(f, "tuns", r, a),
+        RIRStatement::Eq(r, a, b) => bin(f, "eq", r, a, b),
+        RIRStatement::Gt(r, a, b) => bin(f, "gt", r, a, b),
+        RIRStatement::Lt(r, a, b) => bin(f, "lt", r, a, b),
+        RIRStatement::Gte(r, a, b) => bin(f, "gte", r, a, b),
+        RIRStatement::Lte(r, a, b) => bin(f, "lte", r, a, b),
 
-        RIRStatement::Cons(r,a,b) => bin(f, "cons", r, a, b),
-        RIRStatement::Car(r,a)    => uno(f, "car",  r, a),
-        RIRStatement::Cdr(r,a)    => uno(f, "cdr",  r, a),
-        RIRStatement::Nullp(r,a)  => uno(f, "null", r, a),
+        RIRStatement::AsAddr(r, a) => uno(f, "tadr", r, a),
+        RIRStatement::AsSigned(r, a) => uno(f, "tsig", r, a),
+        RIRStatement::AsUnsigned(r, a) => uno(f, "tuns", r, a),
 
-        RIRStatement::Array(r,a)      => uno(f, "arr",  r, a),
-        RIRStatement::Full(r,a,b)     => bin(f, "full", r, a, b),
-        RIRStatement::Unpack(r,a)     => uno(f, "unpk", r, a),
-        RIRStatement::GetIdx(r,a,b)   => bin(f, "gidx", r, a, b),
-        RIRStatement::PutIdx(r,t,i,v)   => tri(f, "pidx", r, t, i, v),
-        RIRStatement::ReadIdx(r,t,o,n)  => tri(f, "ridx", r, t, o, n),
-        RIRStatement::FillIdx(r,t,o,l)  => tri(f, "fidx", r, t, o, l),
-        RIRStatement::FullIdx(r,t,o,n,v) => qua(f, "Fidx", r, t, o, n, v),
+        RIRStatement::Cons(r, a, b) => bin(f, "cons", r, a, b),
+        RIRStatement::Car(r, a) => uno(f, "car", r, a),
+        RIRStatement::Cdr(r, a) => uno(f, "cdr", r, a),
+        RIRStatement::Nullp(r, a) => uno(f, "null", r, a),
 
-        RIRStatement::Hits(r,a) => uno(f, "hits", r, a),
+        RIRStatement::Array(r, a) => uno(f, "arr", r, a),
+        RIRStatement::Full(r, a, b) => bin(f, "full", r, a, b),
+        RIRStatement::Unpack(r, a) => uno(f, "unpk", r, a),
+        RIRStatement::GetIdx(r, a, b) => bin(f, "gidx", r, a, b),
+        RIRStatement::PutIdx(r, t, i, v) => tri(f, "pidx", r, t, i, v),
+        RIRStatement::ReadIdx(r, t, o, n) => tri(f, "ridx", r, t, o, n),
+        RIRStatement::FillIdx(r, t, o, l) => tri(f, "fidx", r, t, o, l),
+        RIRStatement::FullIdx(r, t, o, n, v) => qua(f, "Fidx", r, t, o, n, v),
 
-        RIRStatement::Br(b) => { mn!("b")?; fmt_blk(f, *b) }
-        RIRStatement::CondBr { cond, then_blk, else_blk } => {
-            mn!("cbr")?; fmt_reg(f, cond)?;
-            write!(f, ", ")?; fmt_blk(f, *then_blk)?;
-            write!(f, ", ")?; fmt_blk(f, *else_blk)
+        RIRStatement::Hits(r, a) => uno(f, "hits", r, a),
+
+        RIRStatement::Br(b) => {
+            mn!("b")?;
+            fmt_blk(f, *b)
+        }
+        RIRStatement::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => {
+            mn!("cbr")?;
+            fmt_reg(f, cond)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *then_blk)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *else_blk)
         }
         RIRStatement::PhiOp(r, (ab, av), (bb, bv)) => {
-            mn!("phi")?; fmt_reg(f, r)?;
-            write!(f, ", [")?; fmt_blk(f, *ab)?; write!(f, ": ")?; fmt_reg(f, av)?;
-            write!(f, "], [")?; fmt_blk(f, *bb)?; write!(f, ": ")?; fmt_reg(f, bv)?;
+            mn!("phi")?;
+            fmt_reg(f, r)?;
+            write!(f, ", [")?;
+            fmt_blk(f, *ab)?;
+            write!(f, ": ")?;
+            fmt_reg(f, av)?;
+            write!(f, "], [")?;
+            fmt_blk(f, *bb)?;
+            write!(f, ": ")?;
+            fmt_reg(f, bv)?;
             write!(f, "]")
         }
-        RIRStatement::Ret(r) => { mn!("ret")?; fmt_reg(f, r) }
+        RIRStatement::Ret(r) => {
+            mn!("ret")?;
+            fmt_reg(f, r)
+        }
 
-        RIRStatement::SysDsb(r)            => uno0(f, "@dsb",    r),
-        RIRStatement::SysPrefetchFlush(r)  => uno0(f, "@pfflsh", r),
-        RIRStatement::SysUartInit(r)       => uno0(f, "@uinit",  r),
-        RIRStatement::SysUartGet8(r)       => uno0(f, "@uget8",  r),
-        RIRStatement::SysClearMonitor(r)   => uno0(f, "@mclr",   r),
-        RIRStatement::SysGetMonitor(r)     => uno0(f, "@mget",   r),
-        RIRStatement::SysStopMonitor(r)    => uno0(f, "@mstp",   r),
+        RIRStatement::SysDsb(r) => uno0(f, "@dsb", r),
+        RIRStatement::SysPrefetchFlush(r) => uno0(f, "@pfflsh", r),
+        RIRStatement::SysUartInit(r) => uno0(f, "@uinit", r),
+        RIRStatement::SysUartGet8(r) => uno0(f, "@uget8", r),
+        RIRStatement::SysClearMonitor(r) => uno0(f, "@mclr", r),
+        RIRStatement::SysGetMonitor(r) => uno0(f, "@mget", r),
+        RIRStatement::SysStopMonitor(r) => uno0(f, "@mstp", r),
 
-        RIRStatement::SysGet32(r,a)        => uno(f, "@get32",  r, a),
-        RIRStatement::SysUartPut8(r,a)     => uno(f, "@uput8",  r, a),
-        RIRStatement::SysDelay(r,a)        => uno(f, "@delay",  r, a),
-        RIRStatement::SysPut32(r,a,b)      => bin(f, "@put32",  r, a, b),
-        RIRStatement::SysZero32(r,a,b,c)   => tri(f, "@zero32", r, a, b, c),
-        RIRStatement::SysFull32(r,a,b,c,d) => qua(f, "@full32", r, a, b, c, d),
+        RIRStatement::SysGet32(r, a) => uno(f, "@get32", r, a),
+        RIRStatement::SysUartPut8(r, a) => uno(f, "@uput8", r, a),
+        RIRStatement::SysDelay(r, a) => uno(f, "@delay", r, a),
+        RIRStatement::SysPut32(r, a, b) => bin(f, "@put32", r, a, b),
+        RIRStatement::SysZero32(r, a, b, c) => tri(f, "@zero32", r, a, b, c),
+        RIRStatement::SysStr(r, a, b, c) => tri(f, "@str", r, a, b, c),
+        RIRStatement::SysFull32(r, a, b, c, d) => qua(f, "@full32", r, a, b, c, d),
 
         RIRStatement::Escape(r, src) => uno(f, "esc", r, src),
 
@@ -697,23 +793,52 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &RIRStatement) -> fmt::Result {
 }
 
 fn uno0(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_reg(f, r)
+    write!(f, "{:<7}", m)?;
+    fmt_reg(f, r)
 }
 fn uno(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_reg(f, r)?; write!(f, ", ")?; fmt_reg(f, a)
+    write!(f, "{:<7}", m)?;
+    fmt_reg(f, r)?;
+    write!(f, ", ")?;
+    fmt_reg(f, a)
 }
 fn bin(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_reg(f, r)?; write!(f, ", ")?;
-    fmt_reg(f, a)?; write!(f, ", ")?; fmt_reg(f, b)
+    write!(f, "{:<7}", m)?;
+    fmt_reg(f, r)?;
+    write!(f, ", ")?;
+    fmt_reg(f, a)?;
+    write!(f, ", ")?;
+    fmt_reg(f, b)
 }
 fn tri(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg, c: &VReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_reg(f, r)?; write!(f, ", ")?;
-    fmt_reg(f, a)?; write!(f, ", ")?; fmt_reg(f, b)?; write!(f, ", ")?; fmt_reg(f, c)
+    write!(f, "{:<7}", m)?;
+    fmt_reg(f, r)?;
+    write!(f, ", ")?;
+    fmt_reg(f, a)?;
+    write!(f, ", ")?;
+    fmt_reg(f, b)?;
+    write!(f, ", ")?;
+    fmt_reg(f, c)
 }
-fn qua(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg, c: &VReg, d: &VReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_reg(f, r)?; write!(f, ", ")?;
-    fmt_reg(f, a)?; write!(f, ", ")?; fmt_reg(f, b)?; write!(f, ", ")?;
-    fmt_reg(f, c)?; write!(f, ", ")?; fmt_reg(f, d)
+fn qua(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &VReg,
+    a: &VReg,
+    b: &VReg,
+    c: &VReg,
+    d: &VReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_reg(f, r)?;
+    write!(f, ", ")?;
+    fmt_reg(f, a)?;
+    write!(f, ", ")?;
+    fmt_reg(f, b)?;
+    write!(f, ", ")?;
+    fmt_reg(f, c)?;
+    write!(f, ", ")?;
+    fmt_reg(f, d)
 }
 
 impl fmt::Debug for RIRSegment {

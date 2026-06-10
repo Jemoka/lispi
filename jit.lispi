@@ -1,232 +1,131 @@
-;;;; helpers ;;
+(set life/w 20)
+(set life/h 20)
+(set life/scale 2)
+(set life/fb-w 320)
+(set life/fb-h 240)
+(set life/cells (* life/w life/h))
+(set life/pixels (* life/fb-w life/fb-h))
+(set life/random #0x8000)
+(set life/alive-color 0x00ff66)
+(set life/dead-color 0x000000)
 
-(defun nth (n l)
-  (if (eq n 0)
-      (car l)
-    (nth (- n 1) (cdr l))))
-(defun map (f l)
-  (if (nullp l)
+(defun life/index (x y)
+  (+ (* y life/w) x))
+
+(defun life/random-cell (i)
+  (binand (>> (getidx life/random i) (mod i 17)) 1))
+
+(defun life/seed (board i)
+  (if (eq i life/cells)
+      board
+    (begin
+     (putidx board i (life/random-cell i))
+     (life/seed board (+ i 1)))))
+
+(defun life/neighbors (board i)
+  (let (a (getidx board (- i (+ life/w 1)))
+        b (getidx board (- i life/w))
+        c (getidx board (- i (- life/w 1)))
+        d (getidx board (- i 1))
+        e (getidx board (+ i 1))
+        f (getidx board (+ i (- life/w 1)))
+        g (getidx board (+ i life/w))
+        h (getidx board (+ i (+ life/w 1))))
+    (+ (+ (+ a b) (+ c d))
+       (+ (+ e f) (+ g h)))))
+
+(defun life/rule (alive n)
+  (if (eq alive 1)
+      (if (or (eq n 2) (eq n 3)) 1 0)
+    (if (eq n 3) 1 0)))
+
+(defun life/step-cell (board next y x)
+  (if (eq x (- life/w 1))
       nil
-    (cons (f (car l)) (map f (cdr l)))))
-(defun reduce (f acc l)
-  (if (nullp l)
-      acc
-    (reduce f (f acc (car l)) (cdr l))))
-(defun filter (f l)
-  (if (nullp l)
-      nil
-    (if (f (car l))
-        (cons (car l) (filter f (cdr l)))
-      (filter f (cdr l)))))
-(defun while (cond body)
-  (if (cond)
+    (let (i (life/index x y))
       (begin
-       body
-       (while cond body))
-    nil))
-(defun identity (x) x)
-(defun repeat (n val)
-  (if (eq n 0) nil
-    (cons val (repeat (- n 1) val))))
-(defun append (a b)
-  (if (nullp a) b
-    (cons (car a) (append (cdr a) b))))
+       (putidx next i (life/rule (getidx board i)
+                                 (life/neighbors board i)))
+       (life/step-cell board next y (+ x 1))))))
 
+(defun life/step-row (board next y)
+  (if (eq y (- life/h 1))
+      next
+    (begin
+     (life/step-cell board next y 1)
+     (life/step-row board next (+ y 1)))))
 
-(defun fib (n)
-  (if (or (eq n 0) (eq n 1))
-      n
-    (+ (fib (- n 1)) (fib (- n 2)))))
+(defun life/step (board next)
+  (begin
+   (fullidx next 0 life/cells 0)
+   (life/step-row board next 1)))
 
-;; non-recursive, compute-heavy mixer for JIT benchmarking.
-;; ~40 arithmetic ops on a single integer input, fully straight-line.
-(defun blend (x)
-  (let (a (+ (* x x) 7)
-        b (- (* x 3) 5))
-    (let (c (+ (* a b) (* a 2))
-          d (- (* b b) (* a 3)))
-      (let (e (* (+ c d) (- c b))
-            f (+ (* d 11) (- c a)))
-        (let (g (* (+ e f) (- e d))
-              h (- (* f 13) (* e 2)))
-          (let (i (+ (* g h) (* g 17))
-                j (- (* h h) (* g 5)))
-            (let (k (* (+ i j) (- i h))
-                  l (+ (* j 19) (- i g)))
-              (let (m (* (+ k l) (- k j))
-                    n (- (* l 23) (* k 7)))
-                (+ (* m n) (- m l))))))))))
+(defun life/draw-cell-line (img px py n color)
+  (if (eq n life/scale)
+      nil
+    (begin
+     (fullidx img (+ (* (+ py n) life/fb-w) px) life/scale color)
+     (life/draw-cell-line img px py (+ n 1) color))))
 
+(defun life/draw-cell (img board x y)
+  (let (px (* x life/scale)
+        py (* y life/scale)
+        color (if (eq (getidx board (life/index x y)) 1)
+                  life/alive-color
+                life/dead-color))
+    (life/draw-cell-line img px py 0 color)))
 
-(let (start (@timer/us))
-  (begin 
-   (blend 128)
-   (blend 128)
-   (blend 128)
-   (blend 128)
-   (blend 128)
-   (- (@timer/us) start)))
+(defun life/draw-row-cell (img board y x)
+  (if (eq x life/w)
+      nil
+    (begin
+     (life/draw-cell img board x y)
+     (life/draw-row-cell img board y (+ x 1)))))
 
-(let (start (@timer/us)
-            jitted (jit blend 1))
-  (begin 
-   (jitted 128)
-   (jitted 128)
-   (jitted 128)
-   (jitted 128)
-   (jitted 128)
-   (- (@timer/us) start)))
+(defun life/draw-row (img board y)
+  (if (eq y life/h)
+      img
+    (begin
+     (life/draw-row-cell img board y 0)
+     (life/draw-row img board (+ y 1)))))
 
-;; (begin 
-;;  (@monitor/clear)
-;;  (let (mo (@monitor/get)
-;;           jm (jit blend 1))
-;;    (begin
-;;     (jm 512)
-;;     (- (car mo) (car (@monitor/get))))))
+(defun life/draw (img board)
+  (life/draw-row img board 0))
 
-;; (begin 
-;;  (@monitor/clear)
-;;  (let (mo (@monitor/get))
-;;    (begin
-;;     (blend 512)
-;;     (- (car mo) (car (@monitor/get))))))
+(defun life/frame (base img board next)
+  (begin
+   (life/step board next)
+   (life/draw img next)
+   (@str base 0 img)
+   next))
 
+(defun life/run (base img board next n)
+  (if (eq n 0)
+      board
+    (begin
+     (life/frame base img board next)
+     (life/run base img next board (- n 1)))))
 
+(defun life/demo (n)
+  (let (fbuf (framebuf/alloc life/fb-w life/fb-h 32))
+    (let (base (g2p (addr (car fbuf)))
+          img (full life/pixels life/dead-color)
+          board (full life/cells 0)
+          next (full life/cells 0))
+      (begin
+       (life/seed board 0)
+       (life/draw img board)
+       (@str base 0 img)
+       (life/run base img board next n)))))
 
-(defun fib (n)
-  (if (or (eq n 0) (eq n 1))
-      n
-    (+ (fib (- n 1)) (fib (- n 2)))))
+(set life/jit true)
 
-(/ (begin 
- (let (jm (jit fib 1)
-          mo (@timer/us))
-   (begin
-    (jm 1)
-    (jm 2)
-    (jm 3)
-    (jm 4)
-    (jm 5)
+(if life/jit
+    (begin
+     (set life/index (jit life/index 0 0))
+     (set life/neighbors (jit life/neighbors (full life/cells 0) 0))
+     (set life/rule (jit life/rule 0 0))
+     (set life/frame (jit life/frame #0 (full life/pixels 0) (full life/cells 0) (full life/cells 0))))
+  nil)
 
-    (jm 6)
-    (jm 7)
-    (jm 8)
-    (jm 9)
-    (jm 10)
-
-    (jm 11)
-    (jm 12)
-    (jm 13)
-    (jm 14)
-    (jm 15)
-
-    (jm 16)
-    (jm 17)
-    (jm 18)
-    (jm 19)
-
-    (jm 20)
-    (jm 21)
-    (jm 22)
-    (jm 23)
-    (- (@timer/us) mo)))) 10000)
-
-
-(/ (begin 
- (@monitor/clear)
- (let (mo (@timer/us))
-   (begin
-    (fib 1)
-    (fib 2)
-    (fib 3)
-    (fib 4)
-    (fib 5)
-
-    (fib 6)
-    (fib 7)
-    (fib 8)
-    (fib 9)
-    (fib 10)
-
-    (fib 11)
-    (fib 12)
-    (fib 13)
-    (fib 14)
-    (fib 15)
-
-    (fib 16)
-    (fib 17)
-    (fib 18)
-    (fib 19)
-
-    (fib 20)
-    (fib 21)
-    (fib 22)
-    (fib 23)
-    (- (@timer/us) mo)))) 10000)
-
-
-
-(/ (let (mo (@timer/us)
-            jm (jit fib 1))
-     (begin
-      (jm 1)
-      (jm 2)
-      (jm 3)
-      (jm 4)
-      (jm 5)
-
-      (jm 6)
-      (jm 7)
-      (jm 8)
-      (jm 9)
-      (jm 10)
-
-      (jm 11)
-      (jm 12)
-      (jm 13)
-      (jm 14)
-      (jm 15)
-
-      (jm 16)
-      (jm 17)
-      (jm 18)
-      (jm 19)
-
-      (jm 20)
-      (jm 21)
-      (jm 22)
-      (jm 23)
-      (- (@timer/us) mo))) 100000)
-
-(/ (let (mo (@timer/us))
-     (begin
-      (fib 1)
-      (fib 2)
-      (fib 3)
-      (fib 4)
-      (fib 5)
-
-      (fib 6)
-      (fib 7)
-      (fib 8)
-      (fib 9)
-      (fib 10)
-
-      (fib 11)
-      (fib 12)
-      (fib 13)
-      (fib 14)
-      (fib 15)
-
-      (fib 16)
-      (fib 17)
-      (fib 18)
-      (fib 19)
-
-      (fib 20)
-      (fib 21)
-      (fib 22)
-      (fib 23)
-      (- (@timer/us) mo))) 100000)
+(life/demo 3)

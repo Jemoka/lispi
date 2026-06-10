@@ -309,37 +309,41 @@
      (drawing/row img x y w width color)
      (drawing/rect img x (+ y 1) w (- h 1) width color))))
 
-;;;; interactive framebuffer demo ;;;;
-(set fbuf (framebuf/alloc 1920 1080 32))
-(set base (g2p (addr (car fbuf))))
-(set img (full (* 1920 1080) 0))
+(defun fib (n)
+  (if (or (eq n 0) (eq n 1))
+      n
+    (+ (fib (- n 1)) (fib (- n 2)))))
 
-(drawing/rect img 10 10 50 50 1920 (framebuf/pack-rgb 255 0 0))
-(drawing/rect img 100 200 50 50 1920 (framebuf/pack-rgb 0 255 0))
-(drawing/rect img 100 200 50 50 1920 (framebuf/pack-rgb 0 255 0))
-(@str base 0 img)
 
-;;;; 1bpp video playback ;;;;
-(defun video/play (base data width height nframes delay)
-  (let (packed-words (/ (* width height) 32)
-        buf (full (/ (* width height) 2) 0))
+(defun repeat (n f)
+  (if (eq n 0) nil
     (begin
-     (defun video/-loop (frame)
-       (if (eq frame nframes) nil
-         (begin
-          (@unpack1to16
-            (@ldr data (* frame packed-words) packed-words)
-            buf)
-          (@str base 0 buf)
-          (@delay delay)
-          (video/-loop (+ frame 1)))))
-     (video/-loop 0))))
+     (f)
+     (repeat (- n 1) f))))
 
+(defun q-bunny (n)
+  (if (or (eq n 1) (eq n 2))
+      1
+    (+ (q-bunny (- n (q-bunny (- n 1))))
+       (q-bunny (- n (q-bunny (- n 2)))))))
 
-;;;; mmmm ;;;;
-(let (info (@apple))
-  (let (data (car info)
-             nframes (nth 1 info)
-             fbuf (framebuf/alloc 320 240 16))
-    (let (base (g2p (addr (car fbuf))))
-      (video/play base data 320 240 nframes  270000))))
+(oir4 (let (a (lambda (x) (+ x 1))) (+ (a 4) 4)))
+
+;; (oir4 (if (or (eq n 1) (eq n 2))
+;;       1
+;;     (+ (q-bunny (- n (q-bunny (- n 1))))
+;;        (q-bunny (- n (q-bunny (- n 2)))))))
+
+;; (let (a (@timer/us))
+;;   (begin
+;;    (q-bunny 22)
+;;    (- (@timer/us) a)))
+
+;; (set qjit (jit q-bunny 1))
+;; (qjit 1)
+
+;; (let (a (@timer/us))
+;;   (begin
+;;    (qjit 22)
+;;    (- (@timer/us) a)))
+

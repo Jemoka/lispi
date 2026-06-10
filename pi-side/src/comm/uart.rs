@@ -1,6 +1,6 @@
 use crate::comm::gpio::{self, GpioFunc};
-use crate::utils::memory::dmb;
 use crate::utils::memory;
+use crate::utils::memory::dmb;
 
 const AUX_ENABLES: usize = 0x2021_5004;
 const AUX_MU_IO_REG: usize = 0x2021_5040;
@@ -109,8 +109,9 @@ pub fn flush_tx() {
 
 pub fn flush() {
     flush_tx();
-    while has_data() { get8(); }
-        
+    while has_data() {
+        get8();
+    }
 }
 
 pub fn write_bytes(bytes: &[u8]) {
@@ -143,9 +144,19 @@ pub fn get32() -> u32 {
 pub struct PiUart;
 
 impl shared::Transport for PiUart {
-    fn put8(&mut self, b: u8) { put8(b); }
-    fn get8(&mut self) -> u8 { get8() }
-    fn put32(&mut self, v: u32) { put32(v); }
-    fn get32(&mut self) -> u32 { get32() }
-    fn flush(&mut self) { flush_tx(); }
+    fn put8(&mut self, b: u8) {
+        put8(b);
+    }
+    fn get8(&mut self) -> u8 {
+        get8()
+    }
+    fn put32(&mut self, v: u32) {
+        put32(v);
+    }
+    fn get32(&mut self) -> u32 {
+        get32()
+    }
+    fn flush(&mut self) {
+        flush_tx();
+    }
 }

@@ -60,11 +60,7 @@ pub fn evaluate(sexp: Rc<Value>, image: &mut Image) -> Result<Value, &'static st
 /// Internal: evaluate with tail-position flag.
 /// When `tail` is true and the result would be a closure call,
 /// returns a TailCall token instead of actually calling.
-pub(super) fn eval(
-    sexp: Rc<Value>,
-    image: &mut Image,
-    tail: bool,
-) -> Result<Value, &'static str> {
+pub(super) fn eval(sexp: Rc<Value>, image: &mut Image, tail: bool) -> Result<Value, &'static str> {
     match &*sexp {
         // fundamental values — return as-is
         Value::Nil

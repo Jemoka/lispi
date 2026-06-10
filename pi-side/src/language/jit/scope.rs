@@ -75,7 +75,10 @@ impl<'a> JitImage<'a> {
 
     /// Pop the top compile-time scope. Mirrors `Image::pop_frame`.
     pub fn pop_frame(&mut self) {
-        debug_assert!(self.frames.len() > 1, "cannot pop the outermost compile frame");
+        debug_assert!(
+            self.frames.len() > 1,
+            "cannot pop the outermost compile frame"
+        );
         self.frames.pop();
     }
 

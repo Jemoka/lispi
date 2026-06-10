@@ -82,6 +82,9 @@ pub enum Special {
     /// Chaitin-Briggs allocation, phi destruction, physical registers
     /// throughout. Returns nil.
     Ir4,
+    /// `(oir4 <sexp>)` — like `(ir4)` plus the LIR-level constant /
+    /// local propagation and peephole pass. Returns nil.
+    Oir4,
     /// `(jitexec <sexp>)` — full pipeline through LIR plus
     /// emission + execution. Returns the value the JIT'd code
     /// computed, equivalent to the interpreter's `(eval <sexp>)`.
@@ -258,6 +261,9 @@ impl Special {
         }
         if name.eq_ignore_ascii_case("ir4") {
             return Some(Self::Ir4);
+        }
+        if name.eq_ignore_ascii_case("oir4") {
+            return Some(Self::Oir4);
         }
         if name.eq_ignore_ascii_case("jitexec") {
             return Some(Self::JitExec);
@@ -811,6 +817,7 @@ pub fn execute_special(
             let mir2 = super::jit::optimize2::optimize2(mir);
             let rir: super::jit::ir3::RIRSegment = mir2.into();
             let lir = super::jit::regalloc::regalloc(rir);
+            let lir = super::jit::optimize4::optimize4(lir);
             let executor = super::jit::executor::JitExecutor::new(lir);
             executor.run(image)
         }
@@ -835,6 +842,29 @@ pub fn execute_special(
             let rir: super::jit::ir3::RIRSegment = mir2.into();
             let lir = super::jit::regalloc::regalloc(rir);
             Ok(Value::String(dump_to_string(&lir)))
+        }
+
+        // `(oir4 <sexp>)` — full pipeline through LIR plus the IR4
+        // optimizer pass.
+        Special::Oir4 => {
+            if !sexp.nth_exists(1) {
+                return Err("oir4: expected 1 argument.");
+            }
+            if sexp.nth_exists(2) {
+                return Err("oir4: too many arguments.");
+            }
+            let arg = sexp.nth(1);
+            let mut seg = super::jit::ir::IRSegment::new();
+            let mut jit_scope = super::jit::scope::JitImage::new(image);
+            seg.cgen(arg, &mut jit_scope)?;
+            let optimized = super::jit::optimize::optimize(seg);
+            let folded: super::jit::ir::IRSegment = optimized.into();
+            let mir: super::jit::ir2::MIRSegment = folded.into();
+            let mir2 = super::jit::optimize2::optimize2(mir);
+            let rir: super::jit::ir3::RIRSegment = mir2.into();
+            let lir = super::jit::regalloc::regalloc(rir);
+            let lir2 = super::jit::optimize4::optimize4(lir);
+            Ok(Value::String(dump_to_string(&lir2)))
         }
 
         // `(oir2 <sexp>)` — full pipeline through MIR + the second

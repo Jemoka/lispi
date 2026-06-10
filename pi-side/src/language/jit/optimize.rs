@@ -65,10 +65,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::language::ast::Value;
-use crate::language::number::Number;
 use super::ir::{IRBasicBlock, IRSegment, IRStatement, VReg};
 use super::scope::LocalId;
+use crate::language::ast::Value;
+use crate::language::number::Number;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnrichedIRStatement {
@@ -84,7 +84,10 @@ pub(crate) struct EnrichedIRStatement {
 ///   `Top`    — proved reachable by tracing from `.L0` through `Br` /
 ///              `CondBr` terminators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BlockState { Top, Bottom }
+pub(crate) enum BlockState {
+    Top,
+    Bottom,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct EnrichedIRBasicBlock {
@@ -95,12 +98,18 @@ pub(crate) struct EnrichedIRBasicBlock {
 /// CFG worklist entry: an edge to (re-)process. `from = None` is the
 /// synthetic entry edge into block 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct FlowWLEntry { from: Option<usize>, to: usize }
+struct FlowWLEntry {
+    from: Option<usize>,
+    to: usize,
+}
 
 /// SSA-use worklist entry: a specific (block, stmt) to re-evaluate
 /// because one of its operands' lattice values changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct UseEntry { block: usize, stmt: usize }
+struct UseEntry {
+    block: usize,
+    stmt: usize,
+}
 
 /// Lattice for SSA values:
 ///   `Top`      — never observed (initial; absence from map == Top).
@@ -122,7 +131,13 @@ impl SCCPState {
         match (self, other) {
             (Top, x) | (x, Top) => x,
             (Bottom, _) | (_, Bottom) => Bottom,
-            (Constant(a), Constant(b)) => if a == b { Constant(a) } else { Bottom },
+            (Constant(a), Constant(b)) => {
+                if a == b {
+                    Constant(a)
+                } else {
+                    Bottom
+                }
+            }
         }
     }
 }
@@ -150,25 +165,40 @@ impl From<EnrichedIRSegment> for IRSegment {
     fn from(e: EnrichedIRSegment) -> Self {
         IRSegment {
             regs: e.vregs,
-            blocks: e.blocks.into_iter().map(|b| IRBasicBlock {
-                dead: matches!(b.state, BlockState::Bottom),
-                statements: b.statements.into_iter()
-                    .filter(|s| !s.dead)
-                    .map(|s| s.seg)
-                    .collect(),
-            }).collect(),
+            blocks: e
+                .blocks
+                .into_iter()
+                .map(|b| IRBasicBlock {
+                    dead: matches!(b.state, BlockState::Bottom),
+                    statements: b
+                        .statements
+                        .into_iter()
+                        .filter(|s| !s.dead)
+                        .map(|s| s.seg)
+                        .collect(),
+                })
+                .collect(),
         }
     }
 }
 
 impl From<IRSegment> for EnrichedIRSegment {
     fn from(seg: IRSegment) -> Self {
-        let blocks = seg.blocks.into_iter().map(|b| EnrichedIRBasicBlock {
-            statements: b.statements.into_iter()
-                .map(|s| EnrichedIRStatement { seg: s, dead: false })
-                .collect(),
-            state: BlockState::Bottom,
-        }).collect();
+        let blocks = seg
+            .blocks
+            .into_iter()
+            .map(|b| EnrichedIRBasicBlock {
+                statements: b
+                    .statements
+                    .into_iter()
+                    .map(|s| EnrichedIRStatement {
+                        seg: s,
+                        dead: false,
+                    })
+                    .collect(),
+                state: BlockState::Bottom,
+            })
+            .collect();
         EnrichedIRSegment {
             vregs: seg.regs,
             blocks,
@@ -210,12 +240,7 @@ impl EnrichedIRSegment {
 
     /// Lower `r` via meet with `new`. If the value moved, push every use
     /// of `r` onto the SSA worklist for re-evaluation.
-    fn update(
-        &mut self,
-        r: &VReg,
-        new: SCCPState,
-        uses: &BTreeMap<VReg, Vec<UseEntry>>,
-    ) {
+    fn update(&mut self, r: &VReg, new: SCCPState, uses: &BTreeMap<VReg, Vec<UseEntry>>) {
         let old = self.get(r);
         let merged = old.clone().meet(new);
         if merged != old {
@@ -288,7 +313,9 @@ impl EnrichedIRSegment {
             } else if let Some(u) = self.use_wl.pop() {
                 // Ignore uses inside not-yet-reachable blocks; we'll see
                 // them again when the block does become live.
-                if !exec_blocks.contains(&u.block) { continue; }
+                if !exec_blocks.contains(&u.block) {
+                    continue;
+                }
                 let stmt = self.blocks[u.block].statements[u.stmt].seg.clone();
                 self.visit(u.block, &stmt, &uses, &local_uses, &reach_out, &exec_edges);
             } else {
@@ -312,29 +339,63 @@ impl EnrichedIRSegment {
     ) {
         use IRStatement::*;
         match s {
-            Br(t) => self.push_flow(exec_edges, FlowWLEntry { from: Some(block), to: *t }),
+            Br(t) => self.push_flow(
+                exec_edges,
+                FlowWLEntry {
+                    from: Some(block),
+                    to: *t,
+                },
+            ),
 
-            CondBr { cond, then_blk, else_blk } => match self.get(cond) {
+            CondBr {
+                cond,
+                then_blk,
+                else_blk,
+            } => match self.get(cond) {
                 // Known condition → only one successor lives.
                 SCCPState::Constant(v) => {
                     let to = if is_falsy(&v) { *else_blk } else { *then_blk };
-                    self.push_flow(exec_edges, FlowWLEntry { from: Some(block), to });
+                    self.push_flow(
+                        exec_edges,
+                        FlowWLEntry {
+                            from: Some(block),
+                            to,
+                        },
+                    );
                 }
                 // Unknowable → both successors live.
                 SCCPState::Bottom => {
-                    self.push_flow(exec_edges, FlowWLEntry { from: Some(block), to: *then_blk });
-                    self.push_flow(exec_edges, FlowWLEntry { from: Some(block), to: *else_blk });
+                    self.push_flow(
+                        exec_edges,
+                        FlowWLEntry {
+                            from: Some(block),
+                            to: *then_blk,
+                        },
+                    );
+                    self.push_flow(
+                        exec_edges,
+                        FlowWLEntry {
+                            from: Some(block),
+                            to: *else_blk,
+                        },
+                    );
                 }
                 // Not yet observed — we'll be revisited when `cond` drops.
                 SCCPState::Top => {}
-            }
+            },
 
             Ret(_) => {}
 
             PhiOp(dst, (pa, va), (pb, vb)) => {
                 // Meet only over predecessor edges that are actually live.
-                let ra = exec_edges.contains(&FlowWLEntry { from: Some(*pa), to: block });
-                let rb = exec_edges.contains(&FlowWLEntry { from: Some(*pb), to: block });
+                let ra = exec_edges.contains(&FlowWLEntry {
+                    from: Some(*pa),
+                    to: block,
+                });
+                let rb = exec_edges.contains(&FlowWLEntry {
+                    from: Some(*pb),
+                    to: block,
+                });
                 let st = match (ra, rb) {
                     (true, true) => self.get(va).meet(self.get(vb)),
                     (true, false) => self.get(va),
@@ -353,7 +414,9 @@ impl EnrichedIRSegment {
                 // Inline-Value bind — Closures/Macros stay opaque, mirror
                 // `eval`'s rule for `Load`.
                 let st = match src {
-                    Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => SCCPState::Bottom,
+                    Value::Closure(_) | Value::Macro(_) | Value::JittedClosure(_) => {
+                        SCCPState::Bottom
+                    }
                     _ => SCCPState::Constant(src.clone()),
                 };
                 self.update_local(*id, st, local_uses);
@@ -420,12 +483,10 @@ impl EnrichedIRSegment {
         macro_rules! fold_arith {
             ($d:expr, $a:expr, $b:expr, $m:ident) => {{
                 let st = match (self.get($a), self.get($b)) {
-                    (Constant(Value::Number(na)), Constant(Value::Number(nb))) => {
-                        match na.$m(nb) {
-                            Ok(n) => Constant(Value::Number(n)),
-                            Err(_) => Bottom,
-                        }
-                    }
+                    (Constant(Value::Number(na)), Constant(Value::Number(nb))) => match na.$m(nb) {
+                        Ok(n) => Constant(Value::Number(n)),
+                        Err(_) => Bottom,
+                    },
                     (Bottom, _) | (_, Bottom) => Bottom,
                     (Top, _) | (_, Top) => Top,
                     _ => Bottom, // both Constant but non-numeric — type error at runtime
@@ -451,18 +512,18 @@ impl EnrichedIRSegment {
 
         match s {
             // Arithmetic
-            Add(d, a, b)    => fold_arith!(d, a, b, add),
-            Sub(d, a, b)    => fold_arith!(d, a, b, sub),
-            Mul(d, a, b)    => fold_arith!(d, a, b, mul),
-            Div(d, a, b)    => fold_arith!(d, a, b, div),
-            Mod(d, a, b)    => fold_arith!(d, a, b, modulo),
+            Add(d, a, b) => fold_arith!(d, a, b, add),
+            Sub(d, a, b) => fold_arith!(d, a, b, sub),
+            Mul(d, a, b) => fold_arith!(d, a, b, mul),
+            Div(d, a, b) => fold_arith!(d, a, b, div),
+            Mod(d, a, b) => fold_arith!(d, a, b, modulo),
             Lshift(d, a, b) => fold_arith!(d, a, b, lshift),
             Rshift(d, a, b) => fold_arith!(d, a, b, rshift),
 
             // Comparisons
-            Eq(d, a, b)  => fold_cmp!(d, a, b, ==),
-            Gt(d, a, b)  => fold_cmp!(d, a, b, >),
-            Lt(d, a, b)  => fold_cmp!(d, a, b, <),
+            Eq(d, a, b) => fold_cmp!(d, a, b, ==),
+            Gt(d, a, b) => fold_cmp!(d, a, b, >),
+            Lt(d, a, b) => fold_cmp!(d, a, b, <),
             Gte(d, a, b) => fold_cmp!(d, a, b, >=),
             Lte(d, a, b) => fold_cmp!(d, a, b, <=),
 
@@ -470,14 +531,18 @@ impl EnrichedIRSegment {
             LogNot(d, a) => {
                 let st = match self.get(a) {
                     Constant(Value::Bool(b)) => Constant(Value::Bool(!b)),
-                    Constant(Value::Number(Number::Integer(0))) =>
-                        Constant(Value::Number(Number::Integer(1))),
-                    Constant(Value::Number(Number::Integer(_))) =>
-                        Constant(Value::Number(Number::Integer(0))),
-                    Constant(Value::Number(Number::Unsigned(0))) =>
-                        Constant(Value::Number(Number::Unsigned(1))),
-                    Constant(Value::Number(Number::Unsigned(_))) =>
-                        Constant(Value::Number(Number::Unsigned(0))),
+                    Constant(Value::Number(Number::Integer(0))) => {
+                        Constant(Value::Number(Number::Integer(1)))
+                    }
+                    Constant(Value::Number(Number::Integer(_))) => {
+                        Constant(Value::Number(Number::Integer(0)))
+                    }
+                    Constant(Value::Number(Number::Unsigned(0))) => {
+                        Constant(Value::Number(Number::Unsigned(1)))
+                    }
+                    Constant(Value::Number(Number::Unsigned(_))) => {
+                        Constant(Value::Number(Number::Unsigned(0)))
+                    }
                     Constant(_) => Bottom, // runtime error
                     Top => Top,
                     Bottom => Bottom,
@@ -488,8 +553,9 @@ impl EnrichedIRSegment {
             // Eager XOR — Bool(truthy(a) != truthy(b)).
             Xor(d, a, b) => {
                 let st = match (self.get(a), self.get(b)) {
-                    (Constant(va), Constant(vb)) =>
-                        Constant(Value::Bool(is_falsy(&va) != is_falsy(&vb))),
+                    (Constant(va), Constant(vb)) => {
+                        Constant(Value::Bool(is_falsy(&va) != is_falsy(&vb)))
+                    }
                     (Bottom, _) | (_, Bottom) => Bottom,
                     _ => Top,
                 };
@@ -500,18 +566,26 @@ impl EnrichedIRSegment {
             // interpreter's coercion (Unsigned dominates).
             BinNot(d, a) => {
                 let st = match self.get(a) {
-                    Constant(Value::Number(Number::Integer(i))) =>
-                        Constant(Value::Number(Number::Integer(!i))),
-                    Constant(Value::Number(Number::Unsigned(u))) =>
-                        Constant(Value::Number(Number::Unsigned(!u))),
+                    Constant(Value::Number(Number::Integer(i))) => {
+                        Constant(Value::Number(Number::Integer(!i)))
+                    }
+                    Constant(Value::Number(Number::Unsigned(u))) => {
+                        Constant(Value::Number(Number::Unsigned(!u)))
+                    }
                     Constant(_) => Bottom,
                     Top => Top,
                     Bottom => Bottom,
                 };
                 Some((d.clone(), st))
             }
-            BinOr(d, a, b)  => Some((d.clone(), fold_bin(self.get(a), self.get(b), |x, y| x | y, |x, y| x | y))),
-            BinAnd(d, a, b) => Some((d.clone(), fold_bin(self.get(a), self.get(b), |x, y| x & y, |x, y| x & y))),
+            BinOr(d, a, b) => Some((
+                d.clone(),
+                fold_bin(self.get(a), self.get(b), |x, y| x | y, |x, y| x | y),
+            )),
+            BinAnd(d, a, b) => Some((
+                d.clone(),
+                fold_bin(self.get(a), self.get(b), |x, y| x & y, |x, y| x & y),
+            )),
 
             // Cons / car / cdr / nullp on constant data.
             Cons(d, a, b) => {
@@ -596,21 +670,30 @@ impl EnrichedIRSegment {
             // LoadLocal and Escape are handled in `visit` (they touch
             // lstate / trigger taint) — they never reach this `eval`.
             LoadCapture(d, _)
-            | Array(d, _) | Full(d, _, _) | Unpack(d, _)
+            | Array(d, _)
+            | Full(d, _, _)
+            | Unpack(d, _)
             | GetIdx(d, _, _)
             | Hits(d, _)
-            | SysDsb(d) | SysPrefetchFlush(d) | SysUartInit(d) | SysUartGet8(d)
-            | SysClearMonitor(d) | SysGetMonitor(d) | SysStopMonitor(d)
-            | SysGet32(d, _) | SysUartPut8(d, _) | SysDelay(d, _)
-            | SysPut32(d, _, _)
-                => Some((d.clone(), Bottom)),
+            | SysDsb(d)
+            | SysPrefetchFlush(d)
+            | SysUartInit(d)
+            | SysUartGet8(d)
+            | SysClearMonitor(d)
+            | SysGetMonitor(d)
+            | SysStopMonitor(d)
+            | SysGet32(d, _)
+            | SysUartPut8(d, _)
+            | SysDelay(d, _)
+            | SysPut32(d, _, _) => Some((d.clone(), Bottom)),
 
-            PutIdx(d, _, _, _) | ReadIdx(d, _, _, _) | FillIdx(d, _, _, _)
+            PutIdx(d, _, _, _)
+            | ReadIdx(d, _, _, _)
+            | FillIdx(d, _, _, _)
             | SysZero32(d, _, _, _)
-                => Some((d.clone(), Bottom)),
+            | SysStr(d, _, _, _) => Some((d.clone(), Bottom)),
 
-            FullIdx(d, _, _, _, _) | SysFull32(d, _, _, _, _)
-                => Some((d.clone(), Bottom)),
+            FullIdx(d, _, _, _, _) | SysFull32(d, _, _, _, _) => Some((d.clone(), Bottom)),
 
             // Call result is opaque — like Escape, treat as Bottom.
             // Handled here (not via `visit`) so the dst gets a value
@@ -619,12 +702,18 @@ impl EnrichedIRSegment {
 
             // No-dst stmts or handled in `visit`.
             Load(_, _)
-            | LoadLocal(_, _) | Escape(_, _)
-            | PushFrame | PopFrame
-            | BindLocal { .. } | BindImmediate { .. }
-            | StoreLocal(_, _) | StoreCapture(_, _)
-            | Br(_) | CondBr { .. } | Ret(_) | PhiOp(_, _, _)
-                => None,
+            | LoadLocal(_, _)
+            | Escape(_, _)
+            | PushFrame
+            | PopFrame
+            | BindLocal { .. }
+            | BindImmediate { .. }
+            | StoreLocal(_, _)
+            | StoreCapture(_, _)
+            | Br(_)
+            | CondBr { .. }
+            | Ret(_)
+            | PhiOp(_, _, _) => None,
         }
     }
 
@@ -654,7 +743,12 @@ impl EnrichedIRSegment {
 
                 // Constant-folded CondBr → unconditional Br to the
                 // statically-known successor.
-                if let IRStatement::CondBr { cond, then_blk, else_blk } = &s.seg {
+                if let IRStatement::CondBr {
+                    cond,
+                    then_blk,
+                    else_blk,
+                } = &s.seg
+                {
                     if let SCCPState::Constant(v) =
                         self.state.get(cond).cloned().unwrap_or(SCCPState::Top)
                     {
@@ -698,20 +792,29 @@ impl EnrichedIRSegment {
         let mut wl: Vec<UseEntry> = Vec::new();
         for (bi, b) in self.blocks.iter().enumerate() {
             for si in 0..b.statements.len() {
-                wl.push(UseEntry { block: bi, stmt: si });
+                wl.push(UseEntry {
+                    block: bi,
+                    stmt: si,
+                });
             }
         }
 
         while let Some(u) = wl.pop() {
             let s = &self.blocks[u.block].statements[u.stmt];
-            if s.dead { continue; }
-            if has_side_effect(&s.seg) { continue; }
+            if s.dead {
+                continue;
+            }
+            if has_side_effect(&s.seg) {
+                continue;
+            }
             let dst = match dst_reg(&s.seg) {
                 Some(d) => d,
                 None => continue,
             };
             // Live iff something still reads `dst`.
-            if !uses.get(&dst).map_or(true, |v| v.is_empty()) { continue; }
+            if !uses.get(&dst).map_or(true, |v| v.is_empty()) {
+                continue;
+            }
 
             // Kill this statement. Pull `u` out of every operand's
             // use-list, then re-queue each operand's defining site —
@@ -737,13 +840,19 @@ impl EnrichedIRSegment {
         let mut wl: Vec<usize> = alloc::vec![0];
         let mut seen: BTreeSet<usize> = BTreeSet::new();
         while let Some(b) = wl.pop() {
-            if !seen.insert(b) { continue; }
+            if !seen.insert(b) {
+                continue;
+            }
             self.blocks[b].state = BlockState::Top;
             for s in &self.blocks[b].statements {
-                if s.dead { continue; }
+                if s.dead {
+                    continue;
+                }
                 match &s.seg {
                     IRStatement::Br(t) => wl.push(*t),
-                    IRStatement::CondBr { then_blk, else_blk, .. } => {
+                    IRStatement::CondBr {
+                        then_blk, else_blk, ..
+                    } => {
                         wl.push(*then_blk);
                         wl.push(*else_blk);
                     }
@@ -762,7 +871,13 @@ fn compute_defs(blocks: &[EnrichedIRBasicBlock]) -> BTreeMap<VReg, UseEntry> {
     for (bi, b) in blocks.iter().enumerate() {
         for (si, s) in b.statements.iter().enumerate() {
             if let Some(d) = dst_reg(&s.seg) {
-                defs.insert(d, UseEntry { block: bi, stmt: si });
+                defs.insert(
+                    d,
+                    UseEntry {
+                        block: bi,
+                        stmt: si,
+                    },
+                );
             }
         }
     }
@@ -778,27 +893,51 @@ fn has_side_effect(s: &IRStatement) -> bool {
     // BindLocal / BindImmediate / StoreLocal / StoreCapture all mutate
     // runtime state (slot contents and/or frame entries) — they're
     // implicitly side-effecting via the catch-all below.
-    !matches!(s,
-        Load(..) | LoadLocal(..) | LoadCapture(..)
-        | Add(..) | Sub(..) | Mul(..) | Div(..) | Mod(..) | Lshift(..) | Rshift(..)
-        | BinNot(..) | BinOr(..) | BinAnd(..) | LogNot(..) | Xor(..)
-        | Eq(..) | Gt(..) | Lt(..) | Gte(..) | Lte(..)
-        | AsAddr(..) | AsSigned(..) | AsUnsigned(..)
-        | Cons(..) | Car(..) | Cdr(..) | Nullp(..)
-        | PhiOp(..) | Hits(..)
+    !matches!(
+        s,
+        Load(..)
+            | LoadLocal(..)
+            | LoadCapture(..)
+            | Add(..)
+            | Sub(..)
+            | Mul(..)
+            | Div(..)
+            | Mod(..)
+            | Lshift(..)
+            | Rshift(..)
+            | BinNot(..)
+            | BinOr(..)
+            | BinAnd(..)
+            | LogNot(..)
+            | Xor(..)
+            | Eq(..)
+            | Gt(..)
+            | Lt(..)
+            | Gte(..)
+            | Lte(..)
+            | AsAddr(..)
+            | AsSigned(..)
+            | AsUnsigned(..)
+            | Cons(..)
+            | Car(..)
+            | Cdr(..)
+            | Nullp(..)
+            | PhiOp(..)
+            | Hits(..)
     )
 }
 
 /// For each LocalId, the (block, stmt) sites that read it via
 /// `LoadLocal`. Used to drive re-evaluation when `lstate[id]` lowers.
-fn compute_local_uses(
-    blocks: &[EnrichedIRBasicBlock],
-) -> BTreeMap<LocalId, Vec<UseEntry>> {
+fn compute_local_uses(blocks: &[EnrichedIRBasicBlock]) -> BTreeMap<LocalId, Vec<UseEntry>> {
     let mut uses: BTreeMap<LocalId, Vec<UseEntry>> = BTreeMap::new();
     for (bi, b) in blocks.iter().enumerate() {
         for (si, s) in b.statements.iter().enumerate() {
             if let IRStatement::LoadLocal(_, id) = &s.seg {
-                uses.entry(*id).or_default().push(UseEntry { block: bi, stmt: si });
+                uses.entry(*id).or_default().push(UseEntry {
+                    block: bi,
+                    stmt: si,
+                });
             }
         }
     }
@@ -825,8 +964,7 @@ fn compute_reach(blocks: &[EnrichedIRBasicBlock]) -> Vec<BTreeSet<LocalId>> {
     for (bi, b) in blocks.iter().enumerate() {
         for s in &b.statements {
             match &s.seg {
-                IRStatement::BindLocal { id, .. }
-                | IRStatement::BindImmediate { id, .. } => {
+                IRStatement::BindLocal { id, .. } | IRStatement::BindImmediate { id, .. } => {
                     binds[bi].insert(*id);
                 }
                 _ => {}
@@ -840,7 +978,9 @@ fn compute_reach(blocks: &[EnrichedIRBasicBlock]) -> Vec<BTreeSet<LocalId>> {
         for s in &b.statements {
             match &s.seg {
                 IRStatement::Br(t) => preds[*t].push(bi),
-                IRStatement::CondBr { then_blk, else_blk, .. } => {
+                IRStatement::CondBr {
+                    then_blk, else_blk, ..
+                } => {
                     preds[*then_blk].push(bi);
                     preds[*else_blk].push(bi);
                 }
@@ -866,7 +1006,9 @@ fn compute_reach(blocks: &[EnrichedIRBasicBlock]) -> Vec<BTreeSet<LocalId>> {
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
     reach_out
 }
@@ -877,7 +1019,10 @@ fn compute_uses(blocks: &[EnrichedIRBasicBlock]) -> BTreeMap<VReg, Vec<UseEntry>
     let mut uses: BTreeMap<VReg, Vec<UseEntry>> = BTreeMap::new();
     for (bi, b) in blocks.iter().enumerate() {
         for (si, s) in b.statements.iter().enumerate() {
-            let e = UseEntry { block: bi, stmt: si };
+            let e = UseEntry {
+                block: bi,
+                stmt: si,
+            };
             for r in stmt_operands(&s.seg) {
                 uses.entry(r).or_default().push(e);
             }
@@ -890,36 +1035,68 @@ fn compute_uses(blocks: &[EnrichedIRBasicBlock]) -> BTreeMap<VReg, Vec<UseEntry>
 fn stmt_operands(s: &IRStatement) -> Vec<VReg> {
     use IRStatement::*;
     match s {
-        Load(_, _) | LoadLocal(_, _) | LoadCapture(_, _)
-        | PushFrame | PopFrame | Br(_)
+        Load(_, _)
+        | LoadLocal(_, _)
+        | LoadCapture(_, _)
+        | PushFrame
+        | PopFrame
+        | Br(_)
         | BindImmediate { .. }
-        | SysDsb(_) | SysPrefetchFlush(_) | SysUartInit(_) | SysUartGet8(_)
-        | SysClearMonitor(_) | SysGetMonitor(_) | SysStopMonitor(_)
-            => vec![],
+        | SysDsb(_)
+        | SysPrefetchFlush(_)
+        | SysUartInit(_)
+        | SysUartGet8(_)
+        | SysClearMonitor(_)
+        | SysGetMonitor(_)
+        | SysStopMonitor(_) => vec![],
 
-        StoreLocal(_, r) | StoreCapture(_, r) | Ret(r)
+        StoreLocal(_, r)
+        | StoreCapture(_, r)
+        | Ret(r)
         | BindLocal { src: r, .. }
-        | BinNot(_, r) | LogNot(_, r)
-        | AsAddr(_, r) | AsSigned(_, r) | AsUnsigned(_, r)
-        | Car(_, r) | Cdr(_, r) | Nullp(_, r)
-        | Array(_, r) | Unpack(_, r) | Hits(_, r)
-        | SysGet32(_, r) | SysUartPut8(_, r) | SysDelay(_, r)
+        | BinNot(_, r)
+        | LogNot(_, r)
+        | AsAddr(_, r)
+        | AsSigned(_, r)
+        | AsUnsigned(_, r)
+        | Car(_, r)
+        | Cdr(_, r)
+        | Nullp(_, r)
+        | Array(_, r)
+        | Unpack(_, r)
+        | Hits(_, r)
+        | SysGet32(_, r)
+        | SysUartPut8(_, r)
+        | SysDelay(_, r)
         | Escape(_, r)
-        | CondBr { cond: r, .. }
-            => vec![r.clone()],
+        | CondBr { cond: r, .. } => vec![r.clone()],
 
-        Add(_, a, b) | Sub(_, a, b) | Mul(_, a, b) | Div(_, a, b) | Mod(_, a, b)
-        | Lshift(_, a, b) | Rshift(_, a, b)
-        | BinOr(_, a, b) | BinAnd(_, a, b) | Xor(_, a, b)
-        | Eq(_, a, b) | Gt(_, a, b) | Lt(_, a, b) | Gte(_, a, b) | Lte(_, a, b)
-        | Cons(_, a, b) | Full(_, a, b) | GetIdx(_, a, b)
-        | SysPut32(_, a, b)
-            => vec![a.clone(), b.clone()],
+        Add(_, a, b)
+        | Sub(_, a, b)
+        | Mul(_, a, b)
+        | Div(_, a, b)
+        | Mod(_, a, b)
+        | Lshift(_, a, b)
+        | Rshift(_, a, b)
+        | BinOr(_, a, b)
+        | BinAnd(_, a, b)
+        | Xor(_, a, b)
+        | Eq(_, a, b)
+        | Gt(_, a, b)
+        | Lt(_, a, b)
+        | Gte(_, a, b)
+        | Lte(_, a, b)
+        | Cons(_, a, b)
+        | Full(_, a, b)
+        | GetIdx(_, a, b)
+        | SysPut32(_, a, b) => vec![a.clone(), b.clone()],
 
         PutIdx(_, t, i, v) => vec![t.clone(), i.clone(), v.clone()],
         ReadIdx(_, t, o, n) => vec![t.clone(), o.clone(), n.clone()],
         FillIdx(_, t, o, l) => vec![t.clone(), o.clone(), l.clone()],
-        SysZero32(_, a, b, c) => vec![a.clone(), b.clone(), c.clone()],
+        SysZero32(_, a, b, c) | SysStr(_, a, b, c) => {
+            vec![a.clone(), b.clone(), c.clone()]
+        }
 
         FullIdx(_, t, o, n, v) => vec![t.clone(), o.clone(), n.clone(), v.clone()],
         SysFull32(_, a, b, c, d) => vec![a.clone(), b.clone(), c.clone(), d.clone()],
@@ -934,39 +1111,73 @@ fn stmt_operands(s: &IRStatement) -> Vec<VReg> {
 fn dst_reg(s: &IRStatement) -> Option<VReg> {
     use IRStatement::*;
     match s {
-        Load(d, _) | LoadLocal(d, _) | LoadCapture(d, _)
-        | BinNot(d, _) | LogNot(d, _)
-        | AsAddr(d, _) | AsSigned(d, _) | AsUnsigned(d, _)
-        | Car(d, _) | Cdr(d, _) | Nullp(d, _)
-        | Array(d, _) | Unpack(d, _) | Hits(d, _)
-        | SysDsb(d) | SysPrefetchFlush(d) | SysUartInit(d) | SysUartGet8(d)
-        | SysClearMonitor(d) | SysGetMonitor(d) | SysStopMonitor(d)
-        | SysGet32(d, _) | SysUartPut8(d, _) | SysDelay(d, _)
-        | Escape(d, _)
-            => Some(d.clone()),
+        Load(d, _)
+        | LoadLocal(d, _)
+        | LoadCapture(d, _)
+        | BinNot(d, _)
+        | LogNot(d, _)
+        | AsAddr(d, _)
+        | AsSigned(d, _)
+        | AsUnsigned(d, _)
+        | Car(d, _)
+        | Cdr(d, _)
+        | Nullp(d, _)
+        | Array(d, _)
+        | Unpack(d, _)
+        | Hits(d, _)
+        | SysDsb(d)
+        | SysPrefetchFlush(d)
+        | SysUartInit(d)
+        | SysUartGet8(d)
+        | SysClearMonitor(d)
+        | SysGetMonitor(d)
+        | SysStopMonitor(d)
+        | SysGet32(d, _)
+        | SysUartPut8(d, _)
+        | SysDelay(d, _)
+        | Escape(d, _) => Some(d.clone()),
 
-        Add(d, _, _) | Sub(d, _, _) | Mul(d, _, _) | Div(d, _, _) | Mod(d, _, _)
-        | Lshift(d, _, _) | Rshift(d, _, _)
-        | BinOr(d, _, _) | BinAnd(d, _, _) | Xor(d, _, _)
-        | Eq(d, _, _) | Gt(d, _, _) | Lt(d, _, _) | Gte(d, _, _) | Lte(d, _, _)
-        | Cons(d, _, _) | Full(d, _, _) | GetIdx(d, _, _)
-        | SysPut32(d, _, _)
-            => Some(d.clone()),
+        Add(d, _, _)
+        | Sub(d, _, _)
+        | Mul(d, _, _)
+        | Div(d, _, _)
+        | Mod(d, _, _)
+        | Lshift(d, _, _)
+        | Rshift(d, _, _)
+        | BinOr(d, _, _)
+        | BinAnd(d, _, _)
+        | Xor(d, _, _)
+        | Eq(d, _, _)
+        | Gt(d, _, _)
+        | Lt(d, _, _)
+        | Gte(d, _, _)
+        | Lte(d, _, _)
+        | Cons(d, _, _)
+        | Full(d, _, _)
+        | GetIdx(d, _, _)
+        | SysPut32(d, _, _) => Some(d.clone()),
 
-        PutIdx(d, _, _, _) | ReadIdx(d, _, _, _) | FillIdx(d, _, _, _)
+        PutIdx(d, _, _, _)
+        | ReadIdx(d, _, _, _)
+        | FillIdx(d, _, _, _)
         | SysZero32(d, _, _, _)
-            => Some(d.clone()),
+        | SysStr(d, _, _, _) => Some(d.clone()),
 
-        FullIdx(d, _, _, _, _) | SysFull32(d, _, _, _, _)
-            => Some(d.clone()),
+        FullIdx(d, _, _, _, _) | SysFull32(d, _, _, _, _) => Some(d.clone()),
 
         PhiOp(d, _, _) => Some(d.clone()),
 
         Call { dst, .. } => Some(dst.clone()),
 
-        PushFrame | PopFrame | BindLocal { .. } | BindImmediate { .. }
-        | StoreLocal(_, _) | StoreCapture(_, _)
-        | Br(_) | CondBr { .. } | Ret(_) => None,
+        PushFrame
+        | PopFrame
+        | BindLocal { .. }
+        | BindImmediate { .. }
+        | StoreLocal(_, _)
+        | StoreCapture(_, _)
+        | Br(_)
+        | CondBr { .. }
+        | Ret(_) => None,
     }
 }
 
@@ -982,10 +1193,18 @@ fn fold_bin(
     use SCCPState::*;
     match (a, b) {
         (Constant(Value::Number(na)), Constant(Value::Number(nb))) => match (na, nb) {
-            (Number::Integer(x), Number::Integer(y))   => Constant(Value::Number(Number::Integer(oi(x, y)))),
-            (Number::Unsigned(x), Number::Unsigned(y)) => Constant(Value::Number(Number::Unsigned(ou(x, y)))),
-            (Number::Unsigned(x), Number::Integer(y))  => Constant(Value::Number(Number::Unsigned(ou(x, y as u32)))),
-            (Number::Integer(x), Number::Unsigned(y))  => Constant(Value::Number(Number::Unsigned(ou(x as u32, y)))),
+            (Number::Integer(x), Number::Integer(y)) => {
+                Constant(Value::Number(Number::Integer(oi(x, y))))
+            }
+            (Number::Unsigned(x), Number::Unsigned(y)) => {
+                Constant(Value::Number(Number::Unsigned(ou(x, y))))
+            }
+            (Number::Unsigned(x), Number::Integer(y)) => {
+                Constant(Value::Number(Number::Unsigned(ou(x, y as u32))))
+            }
+            (Number::Integer(x), Number::Unsigned(y)) => {
+                Constant(Value::Number(Number::Unsigned(ou(x as u32, y))))
+            }
             _ => Bottom,
         },
         (Bottom, _) | (_, Bottom) => Bottom,
@@ -997,9 +1216,11 @@ fn fold_bin(
 /// Truthiness matching the interpreter's `is_falsy` (used for the
 /// CondBr-with-known-cond folding).
 fn is_falsy(v: &Value) -> bool {
-    matches!(v,
+    matches!(
+        v,
         Value::Nil
-        | Value::Bool(false)
-        | Value::Number(Number::Integer(0))
-        | Value::Number(Number::Unsigned(0)))
+            | Value::Bool(false)
+            | Value::Number(Number::Integer(0))
+            | Value::Number(Number::Unsigned(0))
+    )
 }

@@ -43,34 +43,53 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::language::ast::Value;
-use crate::language::environment::Binding;
 use super::ir::Name;
 use super::ir3::ImmNumber;
 use super::scope::LocalId;
+use crate::language::ast::Value;
+use crate::language::environment::Binding;
 
 /// ARMv6 GPR. Variants in canonical-number order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(dead_code)]
 pub(crate) enum Register {
-    R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC,
+    R0,
+    R1,
+    R2,
+    R3,
+    R4,
+    R5,
+    R6,
+    R7,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    SP,
+    LR,
+    PC,
 }
 
 #[allow(dead_code)]
 impl Register {
     /// Callee-saved color pool used by the regalloc.
     pub const POOL: &'static [Register] = &[
-        Register::R4, Register::R5, Register::R6, Register::R7,
-        Register::R8, Register::R9, Register::R10, Register::R11,
+        Register::R4,
+        Register::R5,
+        Register::R6,
+        Register::R7,
+        Register::R8,
+        Register::R9,
+        Register::R10,
+        Register::R11,
     ];
 
     /// Reserved spill / parallel-move-cycle-break scratch. Never colored.
     pub const SPILL_SCRATCH: Register = Register::R12;
 
     /// AAPCS argument registers in positional order.
-    pub const ARG: [Register; 4] = [
-        Register::R0, Register::R1, Register::R2, Register::R3,
-    ];
+    pub const ARG: [Register; 4] = [Register::R0, Register::R1, Register::R2, Register::R3];
 
     /// AAPCS return register.
     pub const RETURN: Register = Register::R0;
@@ -102,14 +121,22 @@ impl Register {
 impl fmt::Display for Register {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let n = match self {
-            Register::R0  => "r0",  Register::R1  => "r1",
-            Register::R2  => "r2",  Register::R3  => "r3",
-            Register::R4  => "r4",  Register::R5  => "r5",
-            Register::R6  => "r6",  Register::R7  => "r7",
-            Register::R8  => "r8",  Register::R9  => "r9",
-            Register::R10 => "r10", Register::R11 => "r11",
+            Register::R0 => "r0",
+            Register::R1 => "r1",
+            Register::R2 => "r2",
+            Register::R3 => "r3",
+            Register::R4 => "r4",
+            Register::R5 => "r5",
+            Register::R6 => "r6",
+            Register::R7 => "r7",
+            Register::R8 => "r8",
+            Register::R9 => "r9",
+            Register::R10 => "r10",
+            Register::R11 => "r11",
             Register::R12 => "r12",
-            Register::SP  => "sp",  Register::LR  => "lr",  Register::PC => "pc",
+            Register::SP => "sp",
+            Register::LR => "lr",
+            Register::PC => "pc",
         };
         f.write_str(n)
     }
@@ -130,15 +157,23 @@ impl fmt::Display for SpillSlot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum Cond {
-    Eq, Ne, Lt, Le, Gt, Ge,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 impl Cond {
     pub(super) fn suffix(self) -> &'static str {
         match self {
-            Cond::Eq => "eq", Cond::Ne => "ne",
-            Cond::Lt => "lt", Cond::Le => "le",
-            Cond::Gt => "gt", Cond::Ge => "ge",
+            Cond::Eq => "eq",
+            Cond::Ne => "ne",
+            Cond::Lt => "lt",
+            Cond::Le => "le",
+            Cond::Gt => "gt",
+            Cond::Ge => "ge",
         }
     }
 }
@@ -149,7 +184,6 @@ impl Cond {
 #[allow(dead_code)]
 pub(crate) enum Instr<R> {
     // ===== moves / loads =====
-
     /// `mov dst, src`. Sources: any IR3 op that produced a virtual-
     /// register move via the sequencer (helper arg/ret materialization,
     /// `AsAddr`/`AsSigned`/`AsUnsigned`, phi-destruction copies).
@@ -191,7 +225,6 @@ pub(crate) enum Instr<R> {
     StrOffset(R, R, i32),
 
     // ===== spill (regalloc-emitted) =====
-
     /// `ldr dst, [sp, #spill_offset]`. Emitted by spill rewrite for
     /// each use of a spilled vreg.
     LoadSpill(R, SpillSlot),
@@ -202,7 +235,6 @@ pub(crate) enum Instr<R> {
     // ===== direct ARM ALU (3-addr / 2-addr) =====
     // Sources: identical-name IR3 ops, pass through unchanged with
     // virtual-register operands.
-
     Add(R, R, R),
     Sub(R, R, R),
     /// ARMv6: `rd` must differ from `rm`. Post-coloring fixup pass
@@ -216,7 +248,6 @@ pub(crate) enum Instr<R> {
     Mvn(R, R),
 
     // ===== comparison + materialization =====
-
     /// `cmp a, b`. Sources: IR3 `Eq`/`Gt`/`Lt`/`Gte`/`Lte` (paired
     /// with `Cset`).
     Cmp(R, R),
@@ -229,7 +260,6 @@ pub(crate) enum Instr<R> {
     // ===== helper-call opcodes =====
     // Each is one `bl <symbol>`. Args in r0–r3, return in r0,
     // clobbers caller-saved + flags. Source IR3 op listed per variant.
-
     /// `bl bind_local`. Source: IR3 `BindLocal`, `BindImmediate`.
     BindLocal,
     /// `bl load_local`. Source: IR3 `LoadLocal`.
@@ -311,11 +341,12 @@ pub(crate) enum Instr<R> {
     StopMonitor,
     /// `bl zero32`. Source: IR3 `SysZero32`.
     Zero32,
+    /// Inline word copy. Source: IR3 `SysStr`.
+    StrMem,
     /// `bl full32`. Source: IR3 `SysFull32`.
     Full32,
 
     // ===== inline asm (no helper) =====
-
     /// `dsb sy`. Source: IR3 `SysDsb`.
     Dsb,
     /// MMU prefetch flush (CP15 sequence). Source: IR3 `SysPrefetchFlush`.
@@ -327,7 +358,6 @@ pub(crate) enum Instr<R> {
     // register-list encoding: bit N corresponds to register N
     // (R0=bit 0, R1=bit 1, …, LR=bit 14, PC=bit 15).
     // Use `Register::bit()` to set bits.
-
     /// `push {regs}` — equivalent to `stmdb sp!, {regs}`. Source:
     /// function prologue (callee-save save list).
     StackPush(u16),
@@ -337,7 +367,6 @@ pub(crate) enum Instr<R> {
     StackPop(u16),
 
     // ===== control flow =====
-
     /// `b .Ln`. Source: IR3 `Br`.
     B(usize),
     /// `beq .Ln`. Source: `CondBr` expansion (jump to else-arm).
@@ -352,10 +381,13 @@ pub(crate) enum Instr<R> {
     //
     // These should never appear in `Instr<Register>`. They're variants
     // of the generic enum so the operand-walking code is shared.
-
     /// Conditional branch with virtual cond. Expanded during
     /// `apply_colors` to `CmpImm + Beq + B`. Source: IR3 `CondBr`.
-    CondBr { cond: R, then_blk: usize, else_blk: usize },
+    CondBr {
+        cond: R,
+        then_blk: usize,
+        else_blk: usize,
+    },
     /// SSA phi. Destructed (replaced with `Mov`s at predecessor
     /// tails) before regalloc proper. Source: IR3 `PhiOp`.
     Phi(R, (usize, R), (usize, R)),
@@ -402,11 +434,16 @@ pub(crate) struct LIRSegment {
 /// Format a register-list bitmask in ARM's `{r4, r5, lr}` style.
 fn fmt_reglist(f: &mut fmt::Formatter<'_>, mask: u16) -> fmt::Result {
     f.write_str("{")?;
-    let names = ["r0","r1","r2","r3","r4","r5","r6","r7","r8","r9","r10","r11","r12","sp","lr","pc"];
+    let names = [
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
+        "lr", "pc",
+    ];
     let mut first = true;
     for i in 0..16 {
         if (mask >> i) & 1 == 1 {
-            if !first { f.write_str(", ")?; }
+            if !first {
+                f.write_str(", ")?;
+            }
             f.write_str(names[i])?;
             first = false;
         }
@@ -417,97 +454,196 @@ fn fmt_reglist(f: &mut fmt::Formatter<'_>, mask: u16) -> fmt::Result {
 /// Print one `Instr<R>` where `R: Display`. Used for both post-regalloc
 /// (`Instr<Register>`) and the regalloc-internal (`Instr<Operand>`)
 /// debug dumps.
-pub(super) fn fmt_instr<R: fmt::Display>(
-    f: &mut fmt::Formatter<'_>,
-    i: &Instr<R>,
-) -> fmt::Result {
+pub(super) fn fmt_instr<R: fmt::Display>(f: &mut fmt::Formatter<'_>, i: &Instr<R>) -> fmt::Result {
     const W: usize = 7;
-    macro_rules! mn { ($m:expr) => { write!(f, "{:<width$}", $m, width = W) }; }
-    macro_rules! bl { ($sym:expr) => { write!(f, "{:<width$}{}", "bl", $sym, width = W) }; }
+    macro_rules! mn {
+        ($m:expr) => {
+            write!(f, "{:<width$}", $m, width = W)
+        };
+    }
+    macro_rules! bl {
+        ($sym:expr) => {
+            write!(f, "{:<width$}{}", "bl", $sym, width = W)
+        };
+    }
     match i {
-        Instr::Mov(d, s)       => { mn!("mov")?;   write!(f, "{}, {}", d, s) }
-        Instr::MovImm(d, n)    => { mn!("mov")?;   write!(f, "{}, #{}", d, n) }
-        Instr::MovId(d, id)    => { mn!("mov")?;   write!(f, "{}, #${}", d, id.0) }
-        Instr::LdrValuePtr(d, v) => { mn!("ldr=v")?; write!(f, "{}, #{}", d, v) }
-        Instr::LdrNamePtr(d, n) => { mn!("ldr=n")?; write!(f, "{}, {:?}", d, n.as_str()) }
-        Instr::LdrCapture(d, b) => { mn!("ldr=c")?; write!(f, "{}, [#{:p}]", d, b.as_ref().as_ptr()) }
-        Instr::LdrCapturePtr(d, b) => { mn!("ldr=cp")?; write!(f, "{}, #{:p}", d, b.as_ref().as_ptr()) }
-        Instr::LdrCallCachePtr(d, idx) => { mn!("ldr=cc")?; write!(f, "{}, #cache[{}]", d, idx) }
-        Instr::StrCapture(b, s) => { mn!("str=c")?; write!(f, "[#{:p}], {}", b.as_ref().as_ptr(), s) }
-        Instr::LdrOffset(d, b, o) => { mn!("ldr")?; write!(f, "{}, [{}, #{}]", d, b, o) }
-        Instr::StrOffset(s, b, o) => { mn!("str")?; write!(f, "{}, [{}, #{}]", s, b, o) }
+        Instr::Mov(d, s) => {
+            mn!("mov")?;
+            write!(f, "{}, {}", d, s)
+        }
+        Instr::MovImm(d, n) => {
+            mn!("mov")?;
+            write!(f, "{}, #{}", d, n)
+        }
+        Instr::MovId(d, id) => {
+            mn!("mov")?;
+            write!(f, "{}, #${}", d, id.0)
+        }
+        Instr::LdrValuePtr(d, v) => {
+            mn!("ldr=v")?;
+            write!(f, "{}, #{}", d, v)
+        }
+        Instr::LdrNamePtr(d, n) => {
+            mn!("ldr=n")?;
+            write!(f, "{}, {:?}", d, n.as_str())
+        }
+        Instr::LdrCapture(d, b) => {
+            mn!("ldr=c")?;
+            write!(f, "{}, [#{:p}]", d, b.as_ref().as_ptr())
+        }
+        Instr::LdrCapturePtr(d, b) => {
+            mn!("ldr=cp")?;
+            write!(f, "{}, #{:p}", d, b.as_ref().as_ptr())
+        }
+        Instr::LdrCallCachePtr(d, idx) => {
+            mn!("ldr=cc")?;
+            write!(f, "{}, #cache[{}]", d, idx)
+        }
+        Instr::StrCapture(b, s) => {
+            mn!("str=c")?;
+            write!(f, "[#{:p}], {}", b.as_ref().as_ptr(), s)
+        }
+        Instr::LdrOffset(d, b, o) => {
+            mn!("ldr")?;
+            write!(f, "{}, [{}, #{}]", d, b, o)
+        }
+        Instr::StrOffset(s, b, o) => {
+            mn!("str")?;
+            write!(f, "{}, [{}, #{}]", s, b, o)
+        }
 
-        Instr::LoadSpill(d, s)  => { mn!("ldspl")?; write!(f, "{}, {}", d, s) }
-        Instr::StoreSpill(s, r) => { mn!("stspl")?; write!(f, "{}, {}", s, r) }
+        Instr::LoadSpill(d, s) => {
+            mn!("ldspl")?;
+            write!(f, "{}, {}", d, s)
+        }
+        Instr::StoreSpill(s, r) => {
+            mn!("stspl")?;
+            write!(f, "{}, {}", s, r)
+        }
 
-        Instr::Add(d, a, b)    => { mn!("add")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::Sub(d, a, b)    => { mn!("sub")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::Mul(d, a, b)    => { mn!("mul")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::Lshift(d, a, b) => { mn!("lsl")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::Rshift(d, a, b) => { mn!("lsr")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::BinOr(d, a, b)  => { mn!("orr")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::BinAnd(d, a, b) => { mn!("and")?; write!(f, "{}, {}, {}", d, a, b) }
-        Instr::Mvn(d, a)       => { mn!("mvn")?; write!(f, "{}, {}", d, a) }
+        Instr::Add(d, a, b) => {
+            mn!("add")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::Sub(d, a, b) => {
+            mn!("sub")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::Mul(d, a, b) => {
+            mn!("mul")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::Lshift(d, a, b) => {
+            mn!("lsl")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::Rshift(d, a, b) => {
+            mn!("lsr")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::BinOr(d, a, b) => {
+            mn!("orr")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::BinAnd(d, a, b) => {
+            mn!("and")?;
+            write!(f, "{}, {}, {}", d, a, b)
+        }
+        Instr::Mvn(d, a) => {
+            mn!("mvn")?;
+            write!(f, "{}, {}", d, a)
+        }
 
-        Instr::Cmp(a, b)    => { mn!("cmp")?; write!(f, "{}, {}", a, b) }
-        Instr::CmpImm(a, n) => { mn!("cmp")?; write!(f, "{}, #{}", a, n) }
-        Instr::Cset(d, c)   => { mn!("cset")?; write!(f, "{}, {}", d, c.suffix()) }
+        Instr::Cmp(a, b) => {
+            mn!("cmp")?;
+            write!(f, "{}, {}", a, b)
+        }
+        Instr::CmpImm(a, n) => {
+            mn!("cmp")?;
+            write!(f, "{}, #{}", a, n)
+        }
+        Instr::Cset(d, c) => {
+            mn!("cset")?;
+            write!(f, "{}, {}", d, c.suffix())
+        }
 
-        Instr::BindLocal      => bl!("bind_local"),
-        Instr::LoadLocal      => bl!("load_local"),
-        Instr::StoreLocal     => bl!("store_local"),
-        Instr::UnboxLocal     => bl!("unbox_local"),
-        Instr::PushFrame      => bl!("push_frame"),
-        Instr::PopFrame       => bl!("pop_frame"),
-        Instr::Box            => bl!("box_number"),
-        Instr::Truthy         => bl!("truthy"),
-        Instr::LogNot         => bl!("lognot"),
-        Instr::Xor            => bl!("xor"),
-        Instr::Div            => bl!("__divsi3"),
-        Instr::Mod            => bl!("__modsi3"),
-        Instr::Cons           => bl!("cons_alloc"),
-        Instr::Nullp          => bl!("is_nil"),
-        Instr::Array          => bl!("array_pack"),
-        Instr::Full           => bl!("array_full"),
-        Instr::Unpack         => bl!("array_unpack"),
-        Instr::GetIdx         => bl!("array_getidx"),
-        Instr::PutIdx         => bl!("array_putidx"),
-        Instr::ReadIdx        => bl!("array_readidx"),
-        Instr::FillIdx        => bl!("array_fillidx"),
-        Instr::FullIdx        => bl!("array_fullidx"),
-        Instr::Hits           => bl!("hits_counter"),
-        Instr::Escape         => bl!("escape_to_interp"),
+        Instr::BindLocal => bl!("bind_local"),
+        Instr::LoadLocal => bl!("load_local"),
+        Instr::StoreLocal => bl!("store_local"),
+        Instr::UnboxLocal => bl!("unbox_local"),
+        Instr::PushFrame => bl!("push_frame"),
+        Instr::PopFrame => bl!("pop_frame"),
+        Instr::Box => bl!("box_number"),
+        Instr::Truthy => bl!("truthy"),
+        Instr::LogNot => bl!("lognot"),
+        Instr::Xor => bl!("xor"),
+        Instr::Div => bl!("__divsi3"),
+        Instr::Mod => bl!("__modsi3"),
+        Instr::Cons => bl!("cons_alloc"),
+        Instr::Nullp => bl!("is_nil"),
+        Instr::Array => bl!("array_pack"),
+        Instr::Full => bl!("array_full"),
+        Instr::Unpack => bl!("array_unpack"),
+        Instr::GetIdx => bl!("array_getidx"),
+        Instr::PutIdx => bl!("array_putidx"),
+        Instr::ReadIdx => bl!("array_readidx"),
+        Instr::FillIdx => bl!("array_fillidx"),
+        Instr::FullIdx => bl!("array_fullidx"),
+        Instr::Hits => bl!("hits_counter"),
+        Instr::Escape => bl!("escape_to_interp"),
         // `Call` is a single LIR opcode but the asm emit expands it to
         // 8 words: inline cache check + bl h_call_fast / bl h_call.
         // The printed form makes the expansion visible so the LIR dump
         // doesn't mislead readers into thinking it's a single `bl`.
-        Instr::Call           => write!(
+        Instr::Call => write!(
             f,
             "{:<width$}cache[r3]?fast:slow  ; 8w: ldr r12,[r3]; cmp; beq Ls; \
              bl h_call_fast; b Ld; Ls: bl h_call; Ld:",
-            "call*", width = W),
-        Instr::UartInit       => bl!("uart_init"),
-        Instr::UartGet8       => bl!("uart_get8"),
-        Instr::UartPut8       => bl!("uart_put8"),
-        Instr::Delay          => bl!("delay"),
-        Instr::ClearMonitor   => bl!("monitor_clear"),
-        Instr::GetMonitor     => bl!("monitor_get"),
-        Instr::StopMonitor    => bl!("monitor_stop"),
-        Instr::Zero32         => bl!("zero32"),
-        Instr::Full32         => bl!("full32"),
+            "call*",
+            width = W
+        ),
+        Instr::UartInit => bl!("uart_init"),
+        Instr::UartGet8 => bl!("uart_get8"),
+        Instr::UartPut8 => bl!("uart_put8"),
+        Instr::Delay => bl!("delay"),
+        Instr::ClearMonitor => bl!("monitor_clear"),
+        Instr::GetMonitor => bl!("monitor_get"),
+        Instr::StopMonitor => bl!("monitor_stop"),
+        Instr::Zero32 => bl!("zero32"),
+        Instr::StrMem => mn!("@str"),
+        Instr::Full32 => bl!("full32"),
 
-        Instr::Dsb           => mn!("dsb sy"),
+        Instr::Dsb => mn!("dsb sy"),
         Instr::PrefetchFlush => mn!("@pfflsh"),
 
-        Instr::StackPush(m) => { mn!("push")?; fmt_reglist(f, *m) }
-        Instr::StackPop(m)  => { mn!("pop")?;  fmt_reglist(f, *m) }
+        Instr::StackPush(m) => {
+            mn!("push")?;
+            fmt_reglist(f, *m)
+        }
+        Instr::StackPop(m) => {
+            mn!("pop")?;
+            fmt_reglist(f, *m)
+        }
 
-        Instr::B(t)   => { mn!("b")?;   write!(f, ".L{}", t) }
-        Instr::Beq(t) => { mn!("beq")?; write!(f, ".L{}", t) }
-        Instr::Bne(t) => { mn!("bne")?; write!(f, ".L{}", t) }
-        Instr::Ret    => write!(f, "{:<width$}lr", "bx", width = W),
+        Instr::B(t) => {
+            mn!("b")?;
+            write!(f, ".L{}", t)
+        }
+        Instr::Beq(t) => {
+            mn!("beq")?;
+            write!(f, ".L{}", t)
+        }
+        Instr::Bne(t) => {
+            mn!("bne")?;
+            write!(f, ".L{}", t)
+        }
+        Instr::Ret => write!(f, "{:<width$}lr", "bx", width = W),
 
-        Instr::CondBr { cond, then_blk, else_blk } => {
+        Instr::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => {
             mn!("cbr")?;
             write!(f, "{}, .L{}, .L{}", cond, then_blk, else_blk)
         }

@@ -6,6 +6,7 @@ pub mod ir2;
 pub mod optimize2;
 pub mod ir3;
 pub mod ir4;
+pub mod optimize4;
 pub mod regalloc;
 pub mod encodings;
 pub mod executor;

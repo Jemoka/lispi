@@ -44,10 +44,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::language::ast::Value;
-use crate::language::environment::Binding;
 use super::ir::{IRBasicBlock, IRSegment, IRStatement, Name, VReg};
 use super::scope::LocalId;
+use crate::language::ast::Value;
+use crate::language::environment::Binding;
 
 /// Register holding a value that fits in a single 32-bit slot
 /// (`Number` variants, `Bool`, the falsy-test from `Truthy`).
@@ -72,8 +72,16 @@ pub(crate) enum MIRStatement {
     // --- runtime scope management (mirrors IR) ---
     PushFrame,
     PopFrame,
-    BindLocal { name: Name, id: LocalId, src: HeapReg },
-    BindImmediate { name: Name, id: LocalId, src: Value },
+    BindLocal {
+        name: Name,
+        id: LocalId,
+        src: HeapReg,
+    },
+    BindImmediate {
+        name: Name,
+        id: LocalId,
+        src: Value,
+    },
 
     LoadLocal(HeapReg, LocalId),
     LoadCapture(HeapReg, Binding),
@@ -140,7 +148,11 @@ pub(crate) enum MIRStatement {
 
     // --- control flow ---
     Br(usize),
-    CondBr { cond: ImmReg, then_blk: usize, else_blk: usize },
+    CondBr {
+        cond: ImmReg,
+        then_blk: usize,
+        else_blk: usize,
+    },
 
     /// Phi over imm-typed arms (both predecessors deliver an `ImmReg`).
     PhiOpImm(ImmReg, (usize, ImmReg), (usize, ImmReg)),
@@ -170,13 +182,18 @@ pub(crate) enum MIRStatement {
     SysPut32(ImmReg, ImmReg, ImmReg),
 
     SysZero32(ImmReg, ImmReg, ImmReg, ImmReg),
+    SysStr(ImmReg, HeapReg, ImmReg, HeapReg),
 
     SysFull32(ImmReg, ImmReg, ImmReg, ImmReg, ImmReg),
 
     // --- direct closure call ---
     /// Direct closure dispatch via captured Binding. Result is always
     /// a HeapReg (the callee's return slot). All args boxed up.
-    Call { dst: HeapReg, callee: Binding, args: Vec<HeapReg> },
+    Call {
+        dst: HeapReg,
+        callee: Binding,
+        args: Vec<HeapReg>,
+    },
 
     // --- escape (interpreter bailout) ---
     Escape(HeapReg, HeapReg),
@@ -203,7 +220,11 @@ pub(crate) struct MIRSegment {
 
 /// Natural kind of a VReg, determined by what produced it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Imm, Heap }
+enum Kind {
+    Imm,
+    Heap,
+    Nil,
+}
 
 /// Classify the destination of one IR statement into Imm or Heap.
 /// PhiOp's kind is the meet of its arms (both Imm → Imm; otherwise Heap).
@@ -223,35 +244,77 @@ fn classify_dst(stmt: &IRStatement, kinds: &mut BTreeMap<VReg, Kind>) {
             kinds.insert(d.clone(), k);
         }
 
-        // arith / bitwise / cmp / logical / coercion / nullp / getidx /
-        // hits / sys* — all produce 32-bit-fitting values.
-        Add(d, _, _) | Sub(d, _, _) | Mul(d, _, _) | Div(d, _, _)
-        | Mod(d, _, _) | Lshift(d, _, _) | Rshift(d, _, _)
-        | BinNot(d, _) | BinOr(d, _, _) | BinAnd(d, _, _)
-        | LogNot(d, _) | Xor(d, _, _)
-        | Eq(d, _, _) | Gt(d, _, _) | Lt(d, _, _) | Gte(d, _, _) | Lte(d, _, _)
-        | AsAddr(d, _) | AsSigned(d, _) | AsUnsigned(d, _)
-        | Nullp(d, _) | Hits(d, _)
-        | SysDsb(d) | SysPrefetchFlush(d) | SysUartInit(d) | SysUartGet8(d)
-        | SysClearMonitor(d) | SysGetMonitor(d) | SysStopMonitor(d)
-        | SysGet32(d, _) | SysUartPut8(d, _) | SysDelay(d, _)
+        // arith / bitwise / cmp / logical / coercion / nullp /
+        // hits / scalar-returning syscalls — all produce
+        // 32-bit-fitting values.
+        Add(d, _, _)
+        | Sub(d, _, _)
+        | Mul(d, _, _)
+        | Div(d, _, _)
+        | Mod(d, _, _)
+        | Lshift(d, _, _)
+        | Rshift(d, _, _)
+        | BinNot(d, _)
+        | BinOr(d, _, _)
+        | BinAnd(d, _, _)
+        | LogNot(d, _)
+        | Xor(d, _, _)
+        | Eq(d, _, _)
+        | Gt(d, _, _)
+        | Lt(d, _, _)
+        | Gte(d, _, _)
+        | Lte(d, _, _)
+        | AsAddr(d, _)
+        | AsSigned(d, _)
+        | AsUnsigned(d, _)
+        | Nullp(d, _)
+        | Hits(d, _)
+        | SysUartGet8(d)
+        | SysGet32(d, _) => {
+            kinds.insert(d.clone(), Kind::Imm);
+        }
+
+        // Side-effect syscalls return Nil semantically, but keep a
+        // raw zero carrier until a heap use-site actually needs a slot.
+        SysDsb(d)
+        | SysPrefetchFlush(d)
+        | SysUartInit(d)
+        | SysClearMonitor(d)
+        | SysStopMonitor(d)
+        | SysUartPut8(d, _)
+        | SysDelay(d, _)
         | SysPut32(d, _, _)
         | SysZero32(d, _, _, _)
-        | SysFull32(d, _, _, _, _)
-            => { kinds.insert(d.clone(), Kind::Imm); }
+        | SysStr(d, _, _, _)
+        | SysFull32(d, _, _, _, _) => {
+            kinds.insert(d.clone(), Kind::Nil);
+        }
 
         // LoadLocal/LoadCapture/Cons/Car/Cdr/Array/Full/Unpack/
-        // Put/Read/Fill/FullIdx/Escape — all heap-typed.
-        LoadLocal(d, _) | LoadCapture(d, _)
-        | Cons(d, _, _) | Car(d, _) | Cdr(d, _)
-        | Array(d, _) | Full(d, _, _) | Unpack(d, _) | GetIdx(d, _, _)
-        | PutIdx(d, _, _, _) | ReadIdx(d, _, _, _) | FillIdx(d, _, _, _)
+        // Put/Read/Fill/FullIdx/Escape and list-returning syscalls —
+        // all heap-typed slot ids.
+        LoadLocal(d, _)
+        | LoadCapture(d, _)
+        | Cons(d, _, _)
+        | Car(d, _)
+        | Cdr(d, _)
+        | Array(d, _)
+        | Full(d, _, _)
+        | Unpack(d, _)
+        | GetIdx(d, _, _)
+        | PutIdx(d, _, _, _)
+        | ReadIdx(d, _, _, _)
+        | FillIdx(d, _, _, _)
         | FullIdx(d, _, _, _, _)
         | Escape(d, _)
-            => { kinds.insert(d.clone(), Kind::Heap); }
+        | SysGetMonitor(d) => {
+            kinds.insert(d.clone(), Kind::Heap);
+        }
 
         // Call returns a heap slot id from the runtime helper.
-        Call { dst, .. } => { kinds.insert(dst.clone(), Kind::Heap); }
+        Call { dst, .. } => {
+            kinds.insert(dst.clone(), Kind::Heap);
+        }
 
         PhiOp(d, (_, a), (_, b)) => {
             // Default unclassified arms (e.g. arm in a dead block whose
@@ -259,15 +322,25 @@ fn classify_dst(stmt: &IRStatement, kinds: &mut BTreeMap<VReg, Kind>) {
             // safer default since heap is the more general carrier.
             let ka = kinds.get(a).copied().unwrap_or(Kind::Heap);
             let kb = kinds.get(b).copied().unwrap_or(Kind::Heap);
-            let k = if ka == Kind::Imm && kb == Kind::Imm { Kind::Imm } else { Kind::Heap };
+            let k = if (ka == Kind::Imm || ka == Kind::Nil) && (kb == Kind::Imm || kb == Kind::Nil)
+            {
+                Kind::Imm
+            } else {
+                Kind::Heap
+            };
             kinds.insert(d.clone(), k);
         }
 
         // No-dst statements.
-        PushFrame | PopFrame
-        | BindLocal { .. } | BindImmediate { .. }
-        | StoreLocal(..) | StoreCapture(..)
-        | Br(_) | CondBr { .. } | Ret(_) => {}
+        PushFrame
+        | PopFrame
+        | BindLocal { .. }
+        | BindImmediate { .. }
+        | StoreLocal(..)
+        | StoreCapture(..)
+        | Br(_)
+        | CondBr { .. }
+        | Ret(_) => {}
     }
 }
 
@@ -282,14 +355,21 @@ struct LowerCtx {
 
 impl LowerCtx {
     fn new(kinds: BTreeMap<VReg, Kind>, fresh_base: u32) -> Self {
-        LowerCtx { kinds, next_reg: fresh_base }
+        LowerCtx {
+            kinds,
+            next_reg: fresh_base,
+        }
     }
 
     fn fresh_imm(&mut self) -> ImmReg {
-        let r = ImmReg(self.next_reg); self.next_reg += 1; r
+        let r = ImmReg(self.next_reg);
+        self.next_reg += 1;
+        r
     }
     fn fresh_heap(&mut self) -> HeapReg {
-        let r = HeapReg(self.next_reg); self.next_reg += 1; r
+        let r = HeapReg(self.next_reg);
+        self.next_reg += 1;
+        r
     }
 
     fn kind(&self, v: &VReg) -> Kind {
@@ -304,6 +384,14 @@ impl LowerCtx {
     fn use_imm(&mut self, v: &VReg, out: &mut Vec<MIRStatement>) -> ImmReg {
         match self.kind(v) {
             Kind::Imm => ImmReg(v.0),
+            Kind::Nil => {
+                let i = self.fresh_imm();
+                out.push(MIRStatement::LoadValueImm(
+                    i,
+                    Value::Number(crate::language::number::Number::Integer(0)),
+                ));
+                i
+            }
             Kind::Heap => {
                 let i = self.fresh_imm();
                 out.push(MIRStatement::Unbox(i, HeapReg(v.0)));
@@ -318,6 +406,11 @@ impl LowerCtx {
     fn use_truthy(&mut self, v: &VReg, out: &mut Vec<MIRStatement>) -> ImmReg {
         match self.kind(v) {
             Kind::Imm => ImmReg(v.0),
+            Kind::Nil => {
+                let i = self.fresh_imm();
+                out.push(MIRStatement::LoadValueImm(i, Value::Bool(false)));
+                i
+            }
             Kind::Heap => {
                 let i = self.fresh_imm();
                 out.push(MIRStatement::Truthy(i, HeapReg(v.0)));
@@ -330,6 +423,11 @@ impl LowerCtx {
     fn use_heap(&mut self, v: &VReg, out: &mut Vec<MIRStatement>) -> HeapReg {
         match self.kind(v) {
             Kind::Heap => HeapReg(v.0),
+            Kind::Nil => {
+                let h = self.fresh_heap();
+                out.push(MIRStatement::LoadValuePtr(h, Value::Nil));
+                h
+            }
             Kind::Imm => {
                 let h = self.fresh_heap();
                 out.push(MIRStatement::Box(ImmReg(v.0), h));
@@ -356,29 +454,39 @@ impl From<IRSegment> for MIRSegment {
         let mut ctx = LowerCtx::new(kinds, fresh_base);
 
         // Output blocks pre-sized; we fill statements in order.
-        let mut blocks: Vec<MIRBasicBlock> = seg.blocks.iter()
-            .map(|b| MIRBasicBlock { statements: Vec::new(), dead: b.dead })
+        let mut blocks: Vec<MIRBasicBlock> = seg
+            .blocks
+            .iter()
+            .map(|b| MIRBasicBlock {
+                statements: Vec::new(),
+                dead: b.dead,
+            })
             .collect();
 
-        // Phi predecessor-tail boxes. We can't insert directly while
+        // Phi predecessor-tail materializations. We can't insert directly while
         // lowering merge blocks, because the predecessor block has
         // already been emitted (with its terminator at the end). We
         // queue here and inject before that terminator in a final pass.
-        let mut pending_boxes: Vec<(usize, ImmReg, HeapReg)> = Vec::new();
+        let mut pending_tail: Vec<(usize, MIRStatement)> = Vec::new();
 
         for (bi, block) in seg.blocks.iter().enumerate() {
             for stmt in &block.statements {
-                lower_stmt(stmt, &mut blocks[bi].statements, &mut ctx, &mut pending_boxes);
+                lower_stmt(
+                    stmt,
+                    &mut blocks[bi].statements,
+                    &mut ctx,
+                    &mut pending_tail,
+                );
             }
         }
 
-        // Inject the queued phi-arm boxes at each predecessor's tail
+        // Inject the queued phi-arm materializations at each predecessor's tail
         // (immediately before its terminator). The terminator is always
         // the last statement of a non-empty block; insert at len-1.
-        for (pred, src_imm, dst_heap) in pending_boxes {
+        for (pred, stmt) in pending_tail {
             let stmts = &mut blocks[pred].statements;
             let term_idx = stmts.len().saturating_sub(1);
-            stmts.insert(term_idx, MIRStatement::Box(src_imm, dst_heap));
+            stmts.insert(term_idx, stmt);
         }
 
         MIRSegment {
@@ -393,7 +501,7 @@ fn lower_stmt(
     stmt: &IRStatement,
     out: &mut Vec<MIRStatement>,
     ctx: &mut LowerCtx,
-    pending_boxes: &mut Vec<(usize, ImmReg, HeapReg)>,
+    pending_tail: &mut Vec<(usize, MIRStatement)>,
 ) {
     use IRStatement as I;
     use MIRStatement as M;
@@ -418,25 +526,34 @@ fn lower_stmt(
             // Classifier already decided which namespace `d` lives in;
             // pick the matching emit.
             match ctx.kind(d) {
-                Kind::Imm  => out.push(M::LoadValueImm(ImmReg(d.0), v.clone())),
+                Kind::Imm => out.push(M::LoadValueImm(ImmReg(d.0), v.clone())),
                 Kind::Heap => out.push(M::LoadValuePtr(HeapReg(d.0), v.clone())),
+                Kind::Nil => out.push(M::LoadValuePtr(HeapReg(d.0), v.clone())),
             }
         }
 
         I::PushFrame => out.push(M::PushFrame),
-        I::PopFrame  => out.push(M::PopFrame),
+        I::PopFrame => out.push(M::PopFrame),
 
         I::BindLocal { name, id, src } => {
             let s = ctx.use_heap(src, out);
-            out.push(M::BindLocal { name: name.clone(), id: *id, src: s });
+            out.push(M::BindLocal {
+                name: name.clone(),
+                id: *id,
+                src: s,
+            });
         }
         I::BindImmediate { name, id, src } => {
-            out.push(M::BindImmediate { name: name.clone(), id: *id, src: src.clone() });
+            out.push(M::BindImmediate {
+                name: name.clone(),
+                id: *id,
+                src: src.clone(),
+            });
         }
 
-        I::LoadLocal(d, id)   => out.push(M::LoadLocal(HeapReg(d.0), *id)),
-        I::LoadCapture(d, b)  => out.push(M::LoadCapture(HeapReg(d.0), b.clone())),
-        I::StoreLocal(id, r)  => {
+        I::LoadLocal(d, id) => out.push(M::LoadLocal(HeapReg(d.0), *id)),
+        I::LoadCapture(d, b) => out.push(M::LoadCapture(HeapReg(d.0), b.clone())),
+        I::StoreLocal(id, r) => {
             let s = ctx.use_heap(r, out);
             out.push(M::StoreLocal(*id, s));
         }
@@ -446,17 +563,17 @@ fn lower_stmt(
         }
 
         // arithmetic
-        I::Add(d, a, b)    => imm3!(d, a, b, Add),
-        I::Sub(d, a, b)    => imm3!(d, a, b, Sub),
-        I::Mul(d, a, b)    => imm3!(d, a, b, Mul),
-        I::Div(d, a, b)    => imm3!(d, a, b, Div),
-        I::Mod(d, a, b)    => imm3!(d, a, b, Mod),
+        I::Add(d, a, b) => imm3!(d, a, b, Add),
+        I::Sub(d, a, b) => imm3!(d, a, b, Sub),
+        I::Mul(d, a, b) => imm3!(d, a, b, Mul),
+        I::Div(d, a, b) => imm3!(d, a, b, Div),
+        I::Mod(d, a, b) => imm3!(d, a, b, Mod),
         I::Lshift(d, a, b) => imm3!(d, a, b, Lshift),
         I::Rshift(d, a, b) => imm3!(d, a, b, Rshift),
 
         // bitwise
-        I::BinNot(d, a)    => imm2!(d, a, BinNot),
-        I::BinOr(d, a, b)  => imm3!(d, a, b, BinOr),
+        I::BinNot(d, a) => imm2!(d, a, BinNot),
+        I::BinOr(d, a, b) => imm3!(d, a, b, BinOr),
         I::BinAnd(d, a, b) => imm3!(d, a, b, BinAnd),
 
         // logical
@@ -464,15 +581,15 @@ fn lower_stmt(
         I::Xor(d, a, b) => imm3!(d, a, b, Xor),
 
         // comparison
-        I::Eq(d, a, b)  => imm3!(d, a, b, Eq),
-        I::Gt(d, a, b)  => imm3!(d, a, b, Gt),
-        I::Lt(d, a, b)  => imm3!(d, a, b, Lt),
+        I::Eq(d, a, b) => imm3!(d, a, b, Eq),
+        I::Gt(d, a, b) => imm3!(d, a, b, Gt),
+        I::Lt(d, a, b) => imm3!(d, a, b, Lt),
         I::Gte(d, a, b) => imm3!(d, a, b, Gte),
         I::Lte(d, a, b) => imm3!(d, a, b, Lte),
 
         // coercion
-        I::AsAddr(d, a)     => imm2!(d, a, AsAddr),
-        I::AsSigned(d, a)   => imm2!(d, a, AsSigned),
+        I::AsAddr(d, a) => imm2!(d, a, AsAddr),
+        I::AsSigned(d, a) => imm2!(d, a, AsSigned),
         I::AsUnsigned(d, a) => imm2!(d, a, AsUnsigned),
 
         // cons / list
@@ -481,18 +598,33 @@ fn lower_stmt(
             let rb = ctx.use_heap(b, out);
             out.push(M::Cons(HeapReg(d.0), ra, rb));
         }
-        I::Car(d, a) => { let ra = ctx.use_heap(a, out); out.push(M::Car(HeapReg(d.0), ra)); }
-        I::Cdr(d, a) => { let ra = ctx.use_heap(a, out); out.push(M::Cdr(HeapReg(d.0), ra)); }
-        I::Nullp(d, a) => { let ra = ctx.use_heap(a, out); out.push(M::Nullp(ImmReg(d.0), ra)); }
+        I::Car(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Car(HeapReg(d.0), ra));
+        }
+        I::Cdr(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Cdr(HeapReg(d.0), ra));
+        }
+        I::Nullp(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Nullp(ImmReg(d.0), ra));
+        }
 
         // arrays
-        I::Array(d, a)   => { let ra = ctx.use_heap(a, out); out.push(M::Array(HeapReg(d.0), ra)); }
+        I::Array(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Array(HeapReg(d.0), ra));
+        }
         I::Full(d, a, b) => {
             let ra = ctx.use_heap(a, out);
             let rb = ctx.use_heap(b, out);
             out.push(M::Full(HeapReg(d.0), ra, rb));
         }
-        I::Unpack(d, a)  => { let ra = ctx.use_heap(a, out); out.push(M::Unpack(HeapReg(d.0), ra)); }
+        I::Unpack(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Unpack(HeapReg(d.0), ra));
+        }
         I::GetIdx(d, a, b) => {
             let ra = ctx.use_heap(a, out);
             let rb = ctx.use_heap(b, out);
@@ -525,18 +657,29 @@ fn lower_stmt(
         }
 
         // introspection
-        I::Hits(d, a) => { let ra = ctx.use_heap(a, out); out.push(M::Hits(ImmReg(d.0), ra)); }
+        I::Hits(d, a) => {
+            let ra = ctx.use_heap(a, out);
+            out.push(M::Hits(ImmReg(d.0), ra));
+        }
 
         // control flow
         I::Br(t) => out.push(M::Br(*t)),
-        I::CondBr { cond, then_blk, else_blk } => {
+        I::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => {
             let c = ctx.use_truthy(cond, out);
-            out.push(M::CondBr { cond: c, then_blk: *then_blk, else_blk: *else_blk });
+            out.push(M::CondBr {
+                cond: c,
+                then_blk: *then_blk,
+                else_blk: *else_blk,
+            });
         }
 
         I::PhiOp(d, (pa, va), (pb, vb)) => {
             match ctx.kind(d) {
-                Kind::Imm => {
+                Kind::Imm | Kind::Nil => {
                     // Both arms classified Imm (else d would be Heap).
                     out.push(M::PhiOpImm(
                         ImmReg(d.0),
@@ -549,17 +692,25 @@ fn lower_stmt(
                     // pred-tail. The boxed dst is a fresh HeapReg.
                     let ha = match ctx.kind(va) {
                         Kind::Heap => HeapReg(va.0),
-                        Kind::Imm  => {
+                        Kind::Imm | Kind::Nil => {
                             let h = ctx.fresh_heap();
-                            pending_boxes.push((*pa, ImmReg(va.0), h));
+                            if ctx.kind(va) == Kind::Nil {
+                                pending_tail.push((*pa, M::LoadValuePtr(h, Value::Nil)));
+                            } else {
+                                pending_tail.push((*pa, M::Box(ImmReg(va.0), h)));
+                            }
                             h
                         }
                     };
                     let hb = match ctx.kind(vb) {
                         Kind::Heap => HeapReg(vb.0),
-                        Kind::Imm  => {
+                        Kind::Imm | Kind::Nil => {
                             let h = ctx.fresh_heap();
-                            pending_boxes.push((*pb, ImmReg(vb.0), h));
+                            if ctx.kind(vb) == Kind::Nil {
+                                pending_tail.push((*pb, M::LoadValuePtr(h, Value::Nil)));
+                            } else {
+                                pending_tail.push((*pb, M::Box(ImmReg(vb.0), h)));
+                            }
                             h
                         }
                     };
@@ -574,17 +725,17 @@ fn lower_stmt(
         }
 
         // syscalls
-        I::SysDsb(d)           => out.push(M::SysDsb(ImmReg(d.0))),
+        I::SysDsb(d) => out.push(M::SysDsb(ImmReg(d.0))),
         I::SysPrefetchFlush(d) => out.push(M::SysPrefetchFlush(ImmReg(d.0))),
-        I::SysUartInit(d)      => out.push(M::SysUartInit(ImmReg(d.0))),
-        I::SysUartGet8(d)      => out.push(M::SysUartGet8(ImmReg(d.0))),
-        I::SysClearMonitor(d)  => out.push(M::SysClearMonitor(ImmReg(d.0))),
-        I::SysGetMonitor(d)    => out.push(M::SysGetMonitor(ImmReg(d.0))),
-        I::SysStopMonitor(d)   => out.push(M::SysStopMonitor(ImmReg(d.0))),
+        I::SysUartInit(d) => out.push(M::SysUartInit(ImmReg(d.0))),
+        I::SysUartGet8(d) => out.push(M::SysUartGet8(ImmReg(d.0))),
+        I::SysClearMonitor(d) => out.push(M::SysClearMonitor(ImmReg(d.0))),
+        I::SysGetMonitor(d) => out.push(M::SysGetMonitor(ImmReg(d.0))),
+        I::SysStopMonitor(d) => out.push(M::SysStopMonitor(ImmReg(d.0))),
 
-        I::SysGet32(d, a)    => imm2!(d, a, SysGet32),
+        I::SysGet32(d, a) => imm2!(d, a, SysGet32),
         I::SysUartPut8(d, a) => imm2!(d, a, SysUartPut8),
-        I::SysDelay(d, a)    => imm2!(d, a, SysDelay),
+        I::SysDelay(d, a) => imm2!(d, a, SysDelay),
 
         I::SysPut32(d, a, b) => imm3!(d, a, b, SysPut32),
 
@@ -593,6 +744,13 @@ fn lower_stmt(
             let rb = ctx.use_imm(b, out);
             let rc = ctx.use_imm(c, out);
             out.push(M::SysZero32(ImmReg(d.0), ra, rb, rc));
+        }
+
+        I::SysStr(d, a, b, c) => {
+            let ra = ctx.use_heap(a, out);
+            let rb = ctx.use_imm(b, out);
+            let rc = ctx.use_heap(c, out);
+            out.push(M::SysStr(ImmReg(d.0), ra, rb, rc));
         }
 
         I::SysFull32(d, a, b, c, e) => {
@@ -615,7 +773,11 @@ fn lower_stmt(
             for a in args {
                 harg.push(ctx.use_heap(a, out));
             }
-            out.push(M::Call { dst: HeapReg(dst.0), callee: callee.clone(), args: harg });
+            out.push(M::Call {
+                dst: HeapReg(dst.0),
+                callee: callee.clone(),
+                args: harg,
+            });
         }
     }
 }
@@ -649,126 +811,222 @@ fn fmt_blk(f: &mut fmt::Formatter<'_>, b: usize) -> fmt::Result {
 
 fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &MIRStatement) -> fmt::Result {
     const W: usize = 7;
-    macro_rules! mn { ($m:expr) => { write!(f, "{:<width$}", $m, width = W) }; }
+    macro_rules! mn {
+        ($m:expr) => {
+            write!(f, "{:<width$}", $m, width = W)
+        };
+    }
 
     match s {
         MIRStatement::LoadValueImm(r, v) => {
-            mn!("ldvi")?; fmt_imm(f, r)?; write!(f, ", #{}", v)
+            mn!("ldvi")?;
+            fmt_imm(f, r)?;
+            write!(f, ", #{}", v)
         }
         MIRStatement::LoadValuePtr(r, v) => {
-            mn!("ldvp")?; fmt_heap(f, r)?; write!(f, ", #{}", v)
+            mn!("ldvp")?;
+            fmt_heap(f, r)?;
+            write!(f, ", #{}", v)
         }
 
         MIRStatement::PushFrame => mn!("pushf"),
-        MIRStatement::PopFrame  => mn!("popf"),
+        MIRStatement::PopFrame => mn!("popf"),
 
         MIRStatement::BindLocal { name, id, src } => {
             mn!("bnd")?;
-            fmt_local(f, id)?; write!(f, ", ")?; fmt_heap(f, src)?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_heap(f, src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
         MIRStatement::BindImmediate { name, id, src } => {
             mn!("bim")?;
-            fmt_local(f, id)?; write!(f, ", #{}", src)?;
+            fmt_local(f, id)?;
+            write!(f, ", #{}", src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
 
-        MIRStatement::LoadLocal(r, id)   => { mn!("ldl")?; fmt_heap(f, r)?; write!(f, ", ")?; fmt_local(f, id) }
-        MIRStatement::LoadCapture(r, b)  => { mn!("ldc")?; fmt_heap(f, r)?; write!(f, ", ")?; fmt_binding(f, b) }
-        MIRStatement::StoreLocal(id, r)  => { mn!("stl")?; fmt_local(f, id)?; write!(f, ", ")?; fmt_heap(f, r) }
-        MIRStatement::StoreCapture(b, r) => { mn!("stc")?; fmt_binding(f, b)?; write!(f, ", ")?; fmt_heap(f, r) }
+        MIRStatement::LoadLocal(r, id) => {
+            mn!("ldl")?;
+            fmt_heap(f, r)?;
+            write!(f, ", ")?;
+            fmt_local(f, id)
+        }
+        MIRStatement::LoadCapture(r, b) => {
+            mn!("ldc")?;
+            fmt_heap(f, r)?;
+            write!(f, ", ")?;
+            fmt_binding(f, b)
+        }
+        MIRStatement::StoreLocal(id, r) => {
+            mn!("stl")?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_heap(f, r)
+        }
+        MIRStatement::StoreCapture(b, r) => {
+            mn!("stc")?;
+            fmt_binding(f, b)?;
+            write!(f, ", ")?;
+            fmt_heap(f, r)
+        }
 
         // casts
-        MIRStatement::Unbox(i, h)  => { mn!("ubox")?; fmt_imm(f, i)?; write!(f, ", ")?; fmt_heap(f, h) }
-        MIRStatement::Box(i, h)    => { mn!("box")?;  fmt_imm(f, i)?; write!(f, ", ")?; fmt_heap(f, h) }
-        MIRStatement::Truthy(i, h) => { mn!("trth")?; fmt_imm(f, i)?; write!(f, ", ")?; fmt_heap(f, h) }
+        MIRStatement::Unbox(i, h) => {
+            mn!("ubox")?;
+            fmt_imm(f, i)?;
+            write!(f, ", ")?;
+            fmt_heap(f, h)
+        }
+        MIRStatement::Box(i, h) => {
+            mn!("box")?;
+            fmt_imm(f, i)?;
+            write!(f, ", ")?;
+            fmt_heap(f, h)
+        }
+        MIRStatement::Truthy(i, h) => {
+            mn!("trth")?;
+            fmt_imm(f, i)?;
+            write!(f, ", ")?;
+            fmt_heap(f, h)
+        }
         MIRStatement::UnboxLocal(i, id) => {
-            mn!("uboxl")?; fmt_imm(f, i)?; write!(f, ", ")?; fmt_local(f, id)
+            mn!("uboxl")?;
+            fmt_imm(f, i)?;
+            write!(f, ", ")?;
+            fmt_local(f, id)
         }
 
         // arith / bitwise / cmp / logical — all imm-imm-imm or imm-imm
-        MIRStatement::Add(r,a,b)    => bin_i(f, "add",  r, a, b),
-        MIRStatement::Sub(r,a,b)    => bin_i(f, "sub",  r, a, b),
-        MIRStatement::Mul(r,a,b)    => bin_i(f, "mul",  r, a, b),
-        MIRStatement::Div(r,a,b)    => bin_i(f, "div",  r, a, b),
-        MIRStatement::Mod(r,a,b)    => bin_i(f, "mod",  r, a, b),
-        MIRStatement::Lshift(r,a,b) => bin_i(f, "lsl",  r, a, b),
-        MIRStatement::Rshift(r,a,b) => bin_i(f, "lsr",  r, a, b),
-        MIRStatement::BinOr(r,a,b)  => bin_i(f, "bor",  r, a, b),
-        MIRStatement::BinAnd(r,a,b) => bin_i(f, "band", r, a, b),
-        MIRStatement::Xor(r,a,b)    => bin_i(f, "xor",  r, a, b),
-        MIRStatement::Eq(r,a,b)     => bin_i(f, "eq",   r, a, b),
-        MIRStatement::Gt(r,a,b)     => bin_i(f, "gt",   r, a, b),
-        MIRStatement::Lt(r,a,b)     => bin_i(f, "lt",   r, a, b),
-        MIRStatement::Gte(r,a,b)    => bin_i(f, "gte",  r, a, b),
-        MIRStatement::Lte(r,a,b)    => bin_i(f, "lte",  r, a, b),
+        MIRStatement::Add(r, a, b) => bin_i(f, "add", r, a, b),
+        MIRStatement::Sub(r, a, b) => bin_i(f, "sub", r, a, b),
+        MIRStatement::Mul(r, a, b) => bin_i(f, "mul", r, a, b),
+        MIRStatement::Div(r, a, b) => bin_i(f, "div", r, a, b),
+        MIRStatement::Mod(r, a, b) => bin_i(f, "mod", r, a, b),
+        MIRStatement::Lshift(r, a, b) => bin_i(f, "lsl", r, a, b),
+        MIRStatement::Rshift(r, a, b) => bin_i(f, "lsr", r, a, b),
+        MIRStatement::BinOr(r, a, b) => bin_i(f, "bor", r, a, b),
+        MIRStatement::BinAnd(r, a, b) => bin_i(f, "band", r, a, b),
+        MIRStatement::Xor(r, a, b) => bin_i(f, "xor", r, a, b),
+        MIRStatement::Eq(r, a, b) => bin_i(f, "eq", r, a, b),
+        MIRStatement::Gt(r, a, b) => bin_i(f, "gt", r, a, b),
+        MIRStatement::Lt(r, a, b) => bin_i(f, "lt", r, a, b),
+        MIRStatement::Gte(r, a, b) => bin_i(f, "gte", r, a, b),
+        MIRStatement::Lte(r, a, b) => bin_i(f, "lte", r, a, b),
 
-        MIRStatement::BinNot(r,a)     => uno_i(f, "bnot", r, a),
-        MIRStatement::LogNot(r,a)     => uno_i(f, "lnot", r, a),
-        MIRStatement::AsAddr(r,a)     => uno_i(f, "tadr", r, a),
-        MIRStatement::AsSigned(r,a)   => uno_i(f, "tsig", r, a),
-        MIRStatement::AsUnsigned(r,a) => uno_i(f, "tuns", r, a),
+        MIRStatement::BinNot(r, a) => uno_i(f, "bnot", r, a),
+        MIRStatement::LogNot(r, a) => uno_i(f, "lnot", r, a),
+        MIRStatement::AsAddr(r, a) => uno_i(f, "tadr", r, a),
+        MIRStatement::AsSigned(r, a) => uno_i(f, "tsig", r, a),
+        MIRStatement::AsUnsigned(r, a) => uno_i(f, "tuns", r, a),
 
         // heap-shaped ops
-        MIRStatement::Cons(r,a,b) => bin_h(f, "cons", r, a, b),
-        MIRStatement::Car(r,a)    => uno_h(f, "car",  r, a),
-        MIRStatement::Cdr(r,a)    => uno_h(f, "cdr",  r, a),
-        MIRStatement::Nullp(r,a)  => {
-            mn!("null")?; fmt_imm(f, r)?; write!(f, ", ")?; fmt_heap(f, a)
+        MIRStatement::Cons(r, a, b) => bin_h(f, "cons", r, a, b),
+        MIRStatement::Car(r, a) => uno_h(f, "car", r, a),
+        MIRStatement::Cdr(r, a) => uno_h(f, "cdr", r, a),
+        MIRStatement::Nullp(r, a) => {
+            mn!("null")?;
+            fmt_imm(f, r)?;
+            write!(f, ", ")?;
+            fmt_heap(f, a)
         }
 
-        MIRStatement::Array(r,a)  => uno_h(f, "arr",  r, a),
-        MIRStatement::Full(r,a,b) => bin_h(f, "full", r, a, b),
-        MIRStatement::Unpack(r,a) => uno_h(f, "unpk", r, a),
-        MIRStatement::GetIdx(r,a,b) => {
-            mn!("gidx")?; fmt_heap(f, r)?; write!(f, ", ")?;
-            fmt_heap(f, a)?; write!(f, ", ")?; fmt_heap(f, b)
+        MIRStatement::Array(r, a) => uno_h(f, "arr", r, a),
+        MIRStatement::Full(r, a, b) => bin_h(f, "full", r, a, b),
+        MIRStatement::Unpack(r, a) => uno_h(f, "unpk", r, a),
+        MIRStatement::GetIdx(r, a, b) => {
+            mn!("gidx")?;
+            fmt_heap(f, r)?;
+            write!(f, ", ")?;
+            fmt_heap(f, a)?;
+            write!(f, ", ")?;
+            fmt_heap(f, b)
         }
-        MIRStatement::PutIdx(r,t,i,v) => tri_h(f, "pidx", r, t, i, v),
-        MIRStatement::ReadIdx(r,t,o,n) => tri_h(f, "ridx", r, t, o, n),
-        MIRStatement::FillIdx(r,t,o,l) => tri_h(f, "fidx", r, t, o, l),
-        MIRStatement::FullIdx(r,t,o,n,v) => qua_h(f, "Fidx", r, t, o, n, v),
+        MIRStatement::PutIdx(r, t, i, v) => tri_h(f, "pidx", r, t, i, v),
+        MIRStatement::ReadIdx(r, t, o, n) => tri_h(f, "ridx", r, t, o, n),
+        MIRStatement::FillIdx(r, t, o, l) => tri_h(f, "fidx", r, t, o, l),
+        MIRStatement::FullIdx(r, t, o, n, v) => qua_h(f, "Fidx", r, t, o, n, v),
 
-        MIRStatement::Hits(r,a) => {
-            mn!("hits")?; fmt_imm(f, r)?; write!(f, ", ")?; fmt_heap(f, a)
+        MIRStatement::Hits(r, a) => {
+            mn!("hits")?;
+            fmt_imm(f, r)?;
+            write!(f, ", ")?;
+            fmt_heap(f, a)
         }
 
         // syscalls — all imm
-        MIRStatement::SysDsb(r)            => uno0_i(f, "@dsb",    r),
-        MIRStatement::SysPrefetchFlush(r)  => uno0_i(f, "@pfflsh", r),
-        MIRStatement::SysUartInit(r)       => uno0_i(f, "@uinit",  r),
-        MIRStatement::SysUartGet8(r)       => uno0_i(f, "@uget8",  r),
-        MIRStatement::SysClearMonitor(r)   => uno0_i(f, "@mclr",   r),
-        MIRStatement::SysGetMonitor(r)     => uno0_i(f, "@mget",   r),
-        MIRStatement::SysStopMonitor(r)    => uno0_i(f, "@mstp",   r),
+        MIRStatement::SysDsb(r) => uno0_i(f, "@dsb", r),
+        MIRStatement::SysPrefetchFlush(r) => uno0_i(f, "@pfflsh", r),
+        MIRStatement::SysUartInit(r) => uno0_i(f, "@uinit", r),
+        MIRStatement::SysUartGet8(r) => uno0_i(f, "@uget8", r),
+        MIRStatement::SysClearMonitor(r) => uno0_i(f, "@mclr", r),
+        MIRStatement::SysGetMonitor(r) => uno0_i(f, "@mget", r),
+        MIRStatement::SysStopMonitor(r) => uno0_i(f, "@mstp", r),
 
-        MIRStatement::SysGet32(r,a)        => uno_i(f, "@get32",  r, a),
-        MIRStatement::SysUartPut8(r,a)     => uno_i(f, "@uput8",  r, a),
-        MIRStatement::SysDelay(r,a)        => uno_i(f, "@delay",  r, a),
-        MIRStatement::SysPut32(r,a,b)      => bin_i(f, "@put32",  r, a, b),
-        MIRStatement::SysZero32(r,a,b,c)   => tri_i(f, "@zero32", r, a, b, c),
-        MIRStatement::SysFull32(r,a,b,c,d) => qua_i(f, "@full32", r, a, b, c, d),
+        MIRStatement::SysGet32(r, a) => uno_i(f, "@get32", r, a),
+        MIRStatement::SysUartPut8(r, a) => uno_i(f, "@uput8", r, a),
+        MIRStatement::SysDelay(r, a) => uno_i(f, "@delay", r, a),
+        MIRStatement::SysPut32(r, a, b) => bin_i(f, "@put32", r, a, b),
+        MIRStatement::SysZero32(r, a, b, c) => tri_i(f, "@zero32", r, a, b, c),
+        MIRStatement::SysStr(r, a, b, c) => {
+            write!(f, "{:<7}", "@str")?;
+            fmt_imm(f, r)?;
+            write!(f, ", ")?;
+            fmt_heap(f, a)?;
+            write!(f, ", ")?;
+            fmt_imm(f, b)?;
+            write!(f, ", ")?;
+            fmt_heap(f, c)
+        }
+        MIRStatement::SysFull32(r, a, b, c, d) => qua_i(f, "@full32", r, a, b, c, d),
 
         // control flow
-        MIRStatement::Br(b) => { mn!("b")?; fmt_blk(f, *b) }
-        MIRStatement::CondBr { cond, then_blk, else_blk } => {
-            mn!("cbr")?; fmt_imm(f, cond)?;
-            write!(f, ", ")?; fmt_blk(f, *then_blk)?;
-            write!(f, ", ")?; fmt_blk(f, *else_blk)
+        MIRStatement::Br(b) => {
+            mn!("b")?;
+            fmt_blk(f, *b)
+        }
+        MIRStatement::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => {
+            mn!("cbr")?;
+            fmt_imm(f, cond)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *then_blk)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *else_blk)
         }
         MIRStatement::PhiOpImm(r, (ab, av), (bb, bv)) => {
-            mn!("phii")?; fmt_imm(f, r)?;
-            write!(f, ", [")?; fmt_blk(f, *ab)?; write!(f, ": ")?; fmt_imm(f, av)?;
-            write!(f, "], [")?; fmt_blk(f, *bb)?; write!(f, ": ")?; fmt_imm(f, bv)?;
+            mn!("phii")?;
+            fmt_imm(f, r)?;
+            write!(f, ", [")?;
+            fmt_blk(f, *ab)?;
+            write!(f, ": ")?;
+            fmt_imm(f, av)?;
+            write!(f, "], [")?;
+            fmt_blk(f, *bb)?;
+            write!(f, ": ")?;
+            fmt_imm(f, bv)?;
             write!(f, "]")
         }
         MIRStatement::PhiOpHeap(r, (ab, av), (bb, bv)) => {
-            mn!("phih")?; fmt_heap(f, r)?;
-            write!(f, ", [")?; fmt_blk(f, *ab)?; write!(f, ": ")?; fmt_heap(f, av)?;
-            write!(f, "], [")?; fmt_blk(f, *bb)?; write!(f, ": ")?; fmt_heap(f, bv)?;
+            mn!("phih")?;
+            fmt_heap(f, r)?;
+            write!(f, ", [")?;
+            fmt_blk(f, *ab)?;
+            write!(f, ": ")?;
+            fmt_heap(f, av)?;
+            write!(f, "], [")?;
+            fmt_blk(f, *bb)?;
+            write!(f, ": ")?;
+            fmt_heap(f, bv)?;
             write!(f, "]")
         }
-        MIRStatement::Ret(r) => { mn!("ret")?; fmt_heap(f, r) }
+        MIRStatement::Ret(r) => {
+            mn!("ret")?;
+            fmt_heap(f, r)
+        }
 
         MIRStatement::Escape(r, src) => uno_h(f, "esc", r, src),
 
@@ -787,41 +1045,118 @@ fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &MIRStatement) -> fmt::Result {
 
 // Imm-typed shape helpers.
 fn uno0_i(f: &mut fmt::Formatter<'_>, m: &str, r: &ImmReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_imm(f, r)
+    write!(f, "{:<7}", m)?;
+    fmt_imm(f, r)
 }
 fn uno_i(f: &mut fmt::Formatter<'_>, m: &str, r: &ImmReg, a: &ImmReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_imm(f, r)?; write!(f, ", ")?; fmt_imm(f, a)
+    write!(f, "{:<7}", m)?;
+    fmt_imm(f, r)?;
+    write!(f, ", ")?;
+    fmt_imm(f, a)
 }
 fn bin_i(f: &mut fmt::Formatter<'_>, m: &str, r: &ImmReg, a: &ImmReg, b: &ImmReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_imm(f, r)?; write!(f, ", ")?;
-    fmt_imm(f, a)?; write!(f, ", ")?; fmt_imm(f, b)
+    write!(f, "{:<7}", m)?;
+    fmt_imm(f, r)?;
+    write!(f, ", ")?;
+    fmt_imm(f, a)?;
+    write!(f, ", ")?;
+    fmt_imm(f, b)
 }
-fn tri_i(f: &mut fmt::Formatter<'_>, m: &str, r: &ImmReg, a: &ImmReg, b: &ImmReg, c: &ImmReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_imm(f, r)?; write!(f, ", ")?;
-    fmt_imm(f, a)?; write!(f, ", ")?; fmt_imm(f, b)?; write!(f, ", ")?; fmt_imm(f, c)
+fn tri_i(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &ImmReg,
+    a: &ImmReg,
+    b: &ImmReg,
+    c: &ImmReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_imm(f, r)?;
+    write!(f, ", ")?;
+    fmt_imm(f, a)?;
+    write!(f, ", ")?;
+    fmt_imm(f, b)?;
+    write!(f, ", ")?;
+    fmt_imm(f, c)
 }
-fn qua_i(f: &mut fmt::Formatter<'_>, m: &str, r: &ImmReg, a: &ImmReg, b: &ImmReg, c: &ImmReg, d: &ImmReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_imm(f, r)?; write!(f, ", ")?;
-    fmt_imm(f, a)?; write!(f, ", ")?; fmt_imm(f, b)?; write!(f, ", ")?;
-    fmt_imm(f, c)?; write!(f, ", ")?; fmt_imm(f, d)
+fn qua_i(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &ImmReg,
+    a: &ImmReg,
+    b: &ImmReg,
+    c: &ImmReg,
+    d: &ImmReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_imm(f, r)?;
+    write!(f, ", ")?;
+    fmt_imm(f, a)?;
+    write!(f, ", ")?;
+    fmt_imm(f, b)?;
+    write!(f, ", ")?;
+    fmt_imm(f, c)?;
+    write!(f, ", ")?;
+    fmt_imm(f, d)
 }
 
 // Heap-typed shape helpers.
 fn uno_h(f: &mut fmt::Formatter<'_>, m: &str, r: &HeapReg, a: &HeapReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_heap(f, r)?; write!(f, ", ")?; fmt_heap(f, a)
+    write!(f, "{:<7}", m)?;
+    fmt_heap(f, r)?;
+    write!(f, ", ")?;
+    fmt_heap(f, a)
 }
-fn bin_h(f: &mut fmt::Formatter<'_>, m: &str, r: &HeapReg, a: &HeapReg, b: &HeapReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_heap(f, r)?; write!(f, ", ")?;
-    fmt_heap(f, a)?; write!(f, ", ")?; fmt_heap(f, b)
+fn bin_h(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &HeapReg,
+    a: &HeapReg,
+    b: &HeapReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_heap(f, r)?;
+    write!(f, ", ")?;
+    fmt_heap(f, a)?;
+    write!(f, ", ")?;
+    fmt_heap(f, b)
 }
-fn tri_h(f: &mut fmt::Formatter<'_>, m: &str, r: &HeapReg, a: &HeapReg, b: &HeapReg, c: &HeapReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_heap(f, r)?; write!(f, ", ")?;
-    fmt_heap(f, a)?; write!(f, ", ")?; fmt_heap(f, b)?; write!(f, ", ")?; fmt_heap(f, c)
+fn tri_h(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &HeapReg,
+    a: &HeapReg,
+    b: &HeapReg,
+    c: &HeapReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_heap(f, r)?;
+    write!(f, ", ")?;
+    fmt_heap(f, a)?;
+    write!(f, ", ")?;
+    fmt_heap(f, b)?;
+    write!(f, ", ")?;
+    fmt_heap(f, c)
 }
-fn qua_h(f: &mut fmt::Formatter<'_>, m: &str, r: &HeapReg, a: &HeapReg, b: &HeapReg, c: &HeapReg, d: &HeapReg) -> fmt::Result {
-    write!(f, "{:<7}", m)?; fmt_heap(f, r)?; write!(f, ", ")?;
-    fmt_heap(f, a)?; write!(f, ", ")?; fmt_heap(f, b)?; write!(f, ", ")?;
-    fmt_heap(f, c)?; write!(f, ", ")?; fmt_heap(f, d)
+fn qua_h(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &HeapReg,
+    a: &HeapReg,
+    b: &HeapReg,
+    c: &HeapReg,
+    d: &HeapReg,
+) -> fmt::Result {
+    write!(f, "{:<7}", m)?;
+    fmt_heap(f, r)?;
+    write!(f, ", ")?;
+    fmt_heap(f, a)?;
+    write!(f, ", ")?;
+    fmt_heap(f, b)?;
+    write!(f, ", ")?;
+    fmt_heap(f, c)?;
+    write!(f, ", ")?;
+    fmt_heap(f, d)
 }
 
 impl fmt::Debug for MIRSegment {

@@ -101,10 +101,7 @@ pub fn gpio_set_pullup(pin: u32, pud: GpioPud) {
         core::hint::black_box(0);
     }
     unsafe {
-        put32(
-            GPIO_PUDCLK0 + (pin / 32) as usize * 4,
-            1 << (pin % 32),
-        );
+        put32(GPIO_PUDCLK0 + (pin / 32) as usize * 4, 1 << (pin % 32));
     }
     for _ in 0..150 {
         core::hint::black_box(0);

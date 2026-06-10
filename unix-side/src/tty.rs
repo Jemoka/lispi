@@ -5,9 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 const TTY_PREFIXES: &[&str] = &[
-    "ttyUSB",      // linux
-    "ttyACM",      // linux
-    "cu.SLAB_USB", // mac os
+    "ttyUSB",       // linux
+    "ttyACM",       // linux
+    "cu.SLAB_USB",  // mac os
     "cu.usbserial", // mac os
 ];
 

@@ -1,7 +1,7 @@
 //! LISP Syscall Infrastructure
 
 use alloc::rc::Rc;
-use proc_bitfield::{bitfield, ConvRaw};
+use proc_bitfield::{ConvRaw, bitfield};
 
 use core::alloc::Layout;
 
@@ -128,9 +128,8 @@ impl Syscall {
 // BCM2835 system timer base + low-word offset. `SYSTIMER_CLO` increments
 // at 1 MHz and is the canonical "microseconds since boot" source.
 const SYSTIMER_BASE: usize = 0x2000_3000;
-const SYSTIMER_CLO: usize  = SYSTIMER_BASE + 0x04;
-const SYSTIMER_CHI: usize  = SYSTIMER_BASE + 0x08;
-
+const SYSTIMER_CLO: usize = SYSTIMER_BASE + 0x04;
+const SYSTIMER_CHI: usize = SYSTIMER_BASE + 0x08;
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ConvRaw)]
@@ -142,7 +141,6 @@ pub enum PMUEvent {
     BranchMiss = 0x6,
     DCacheMiss = 0xB,
     MainTLBMiss = 0xF,
-    
 }
 
 bitfield! {
@@ -152,8 +150,8 @@ bitfield! {
         pub resetbufs: bool @ 1, // reset event counter buffers
         pub resetcycle: bool @ 2, // reset cycle counter
         pub divider: bool @ 3, // cycle counter counts every 64 cycles if set
-        pub ctr0interrupt: bool @ 4, // interrupt reporting ctr0 
-        pub ctr1interrupt: bool @ 5, // interrupt reporting ctr0 
+        pub ctr0interrupt: bool @ 4, // interrupt reporting ctr0
+        pub ctr1interrupt: bool @ 5, // interrupt reporting ctr0
         pub cycleinterrupt: bool @ 6, // interrupt reporting cycle counter
         // sbz @ 7
         pub ctr0overflow: bool @ 8, // ctr0 overflow flag
@@ -194,13 +192,13 @@ pub fn execute_syscall(
 
             Ok(Value::cons(
                 Value::Number(super::number::Number::Unsigned(clocks as u32)),
-                Value::cons (
+                Value::cons(
                     Value::Number(super::number::Number::Unsigned(icachemiss as u32)),
-                    Value::cons (
+                    Value::cons(
                         Value::Number(super::number::Number::Unsigned(branchmiss as u32)),
-                        Value::Nil
-                    )
-                )
+                        Value::Nil,
+                    ),
+                ),
             ))
         }
         Syscall::ClearSetMonitor => {
@@ -219,8 +217,7 @@ pub fn execute_syscall(
         }
         Syscall::StopMonitor => {
             unsafe {
-                let pmu_config = PMUControlReg::from(0)
-                    .with_enabled(false);
+                let pmu_config = PMUControlReg::from(0).with_enabled(false);
                 let val: u32 = pmu_config.into();
                 ::core::arch::asm!("mcr p15, 0, {val}, c15, c12, 0", val = in(reg) val);
             };
@@ -242,9 +239,11 @@ pub fn execute_syscall(
             let (hi, lo) = unsafe {
                 loop {
                     let hi1 = get32(SYSTIMER_CHI);
-                    let lo  = get32(SYSTIMER_CLO);
+                    let lo = get32(SYSTIMER_CLO);
                     let hi2 = get32(SYSTIMER_CHI);
-                    if hi1 == hi2 { break (hi1, lo); }
+                    if hi1 == hi2 {
+                        break (hi1, lo);
+                    }
                 }
             };
             Ok(Value::cons(
@@ -325,7 +324,9 @@ pub fn execute_syscall(
         Syscall::UartPut8 => {
             let val = evaluate(sexp.nth(1), image)?;
             if let Value::Number(n) = &val {
-                let byte = n.as_i32().map_err(|_| "uart/put8: argument must be an integer.")?;
+                let byte = n
+                    .as_i32()
+                    .map_err(|_| "uart/put8: argument must be an integer.")?;
                 uart::put8(byte as u8);
                 Ok(Value::Nil)
             } else {
@@ -403,18 +404,26 @@ pub fn execute_syscall(
             let off_val = evaluate(sexp.nth(2), image)?;
             let n_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "read32: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                let a = n
+                    .as_addr()
+                    .map_err(|_| "read32: first arg must be an address.")?;
+                if let super::number::Number::Addr(a) = a {
+                    a
+                } else {
+                    unreachable!()
+                }
             } else {
                 return Err("read32: first arg must be an address.");
             };
             let offset = if let Value::Number(n) = &off_val {
-                n.as_i32().map_err(|_| "read32: offset must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "read32: offset must be an integer.")? as usize
             } else {
                 return Err("read32: offset must be a number.");
             };
             let count = if let Value::Number(n) = &n_val {
-                n.as_i32().map_err(|_| "read32: count must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "read32: count must be an integer.")? as usize
             } else {
                 return Err("read32: count must be a number.");
             };
@@ -422,10 +431,7 @@ pub fn execute_syscall(
             for i in (0..count).rev() {
                 let addr = base + (offset + i) * 4;
                 let val = unsafe { get32(addr) };
-                result = Value::cons(
-                    Value::Number(super::number::Number::Unsigned(val)),
-                    result,
-                );
+                result = Value::cons(Value::Number(super::number::Number::Unsigned(val)), result);
             }
             Ok(result)
         }
@@ -436,18 +442,26 @@ pub fn execute_syscall(
             let off_val = evaluate(sexp.nth(2), image)?;
             let n_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "zero32: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                let a = n
+                    .as_addr()
+                    .map_err(|_| "zero32: first arg must be an address.")?;
+                if let super::number::Number::Addr(a) = a {
+                    a
+                } else {
+                    unreachable!()
+                }
             } else {
                 return Err("zero32: first arg must be an address.");
             };
             let offset = if let Value::Number(n) = &off_val {
-                n.as_i32().map_err(|_| "zero32: offset must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "zero32: offset must be an integer.")? as usize
             } else {
                 return Err("zero32: offset must be a number.");
             };
             let count = if let Value::Number(n) = &n_val {
-                n.as_i32().map_err(|_| "zero32: count must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "zero32: count must be an integer.")? as usize
             } else {
                 return Err("zero32: count must be a number.");
             };
@@ -465,13 +479,20 @@ pub fn execute_syscall(
             let off_val = evaluate(sexp.nth(2), image)?;
             let list_val = evaluate(sexp.nth(3), image)?;
             let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "fill32: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                let a = n
+                    .as_addr()
+                    .map_err(|_| "fill32: first arg must be an address.")?;
+                if let super::number::Number::Addr(a) = a {
+                    a
+                } else {
+                    unreachable!()
+                }
             } else {
                 return Err("fill32: first arg must be an address.");
             };
             let offset = if let Value::Number(n) = &off_val {
-                n.as_i32().map_err(|_| "fill32: offset must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "fill32: offset must be an integer.")? as usize
             } else {
                 return Err("fill32: offset must be a number.");
             };
@@ -482,7 +503,9 @@ pub fn execute_syscall(
                     Value::Nil => break,
                     Value::Cons(head, tail) => {
                         if let Value::Number(n) = head.as_ref() {
-                            let val = n.as_u32().map_err(|_| "fill32: list element must be a u32.")?;
+                            let val = n
+                                .as_u32()
+                                .map_err(|_| "fill32: list element must be a u32.")?;
                             let addr = base + (offset + i) * 4;
                             unsafe { put32(addr, val) };
                             i += 1;
@@ -557,18 +580,26 @@ pub fn execute_syscall(
             let n_val = evaluate(sexp.nth(3), image)?;
             let val_val = evaluate(sexp.nth(4), image)?;
             let base = if let Value::Number(n) = &addr_val {
-                let a = n.as_addr().map_err(|_| "full32: first arg must be an address.")?;
-                if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                let a = n
+                    .as_addr()
+                    .map_err(|_| "full32: first arg must be an address.")?;
+                if let super::number::Number::Addr(a) = a {
+                    a
+                } else {
+                    unreachable!()
+                }
             } else {
                 return Err("full32: first arg must be an address.");
             };
             let offset = if let Value::Number(n) = &off_val {
-                n.as_i32().map_err(|_| "full32: offset must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "full32: offset must be an integer.")? as usize
             } else {
                 return Err("full32: offset must be a number.");
             };
             let count = if let Value::Number(n) = &n_val {
-                n.as_i32().map_err(|_| "full32: count must be an integer.")? as usize
+                n.as_i32()
+                    .map_err(|_| "full32: count must be an integer.")? as usize
             } else {
                 return Err("full32: count must be a number.");
             };
@@ -591,8 +622,14 @@ pub fn execute_syscall(
             let n_val = evaluate(sexp.nth(3), image)?;
             let base = match &addr_val {
                 Value::Number(n) => {
-                    let a = n.as_addr().map_err(|_| "ldr: first arg must be an address or array.")?;
-                    if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                    let a = n
+                        .as_addr()
+                        .map_err(|_| "ldr: first arg must be an address or array.")?;
+                    if let super::number::Number::Addr(a) = a {
+                        a
+                    } else {
+                        unreachable!()
+                    }
                 }
                 Value::Array(a) => a.borrow().as_ptr() as usize,
                 _ => return Err("ldr: first arg must be an address or array."),
@@ -621,8 +658,14 @@ pub fn execute_syscall(
             let arr_val = evaluate(sexp.nth(3), image)?;
             let base = match &addr_val {
                 Value::Number(n) => {
-                    let a = n.as_addr().map_err(|_| "str: first arg must be an address or array.")?;
-                    if let super::number::Number::Addr(a) = a { a } else { unreachable!() }
+                    let a = n
+                        .as_addr()
+                        .map_err(|_| "str: first arg must be an address or array.")?;
+                    if let super::number::Number::Addr(a) = a {
+                        a
+                    } else {
+                        unreachable!()
+                    }
                 }
                 Value::Array(a) => a.borrow().as_ptr() as usize,
                 _ => return Err("str: first arg must be an address or array."),
@@ -659,21 +702,19 @@ pub fn execute_syscall(
                 }
                 // Reinterpret src as bytes to avoid endian issues
                 let src_bytes: &[u8] = unsafe {
-                    core::slice::from_raw_parts(
-                        src_b.as_ptr() as *const u8,
-                        src_b.len() * 4,
-                    )
+                    core::slice::from_raw_parts(src_b.as_ptr() as *const u8, src_b.len() * 4)
                 };
                 let dst_u16: &mut [u16] = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        dst_b.as_mut_ptr() as *mut u16,
-                        dst_b.len() * 2,
-                    )
+                    core::slice::from_raw_parts_mut(dst_b.as_mut_ptr() as *mut u16, dst_b.len() * 2)
                 };
                 let mut pixel = 0usize;
                 for &byte in src_bytes.iter() {
                     for bit in (0..8).rev() {
-                        dst_u16[pixel] = if (byte >> bit) & 1 != 0 { 0xFFFF } else { 0x0000 };
+                        dst_u16[pixel] = if (byte >> bit) & 1 != 0 {
+                            0xFFFF
+                        } else {
+                            0x0000
+                        };
                         pixel += 1;
                     }
                 }

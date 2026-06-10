@@ -102,7 +102,14 @@ fn rn(r: Register) -> u32 {
 // for the other ALU ops).
 
 #[inline]
-fn dp_reg(cond: u32, opcode: u32, set_flags: bool, rd: Register, rn_reg: Register, rm: Register) -> u32 {
+fn dp_reg(
+    cond: u32,
+    opcode: u32,
+    set_flags: bool,
+    rd: Register,
+    rn_reg: Register,
+    rm: Register,
+) -> u32 {
     (cond << 28)
         | (opcode << 21)
         | ((set_flags as u32) << 20)
@@ -183,7 +190,13 @@ pub(crate) fn cmp(rn_reg: Register, rm: Register) -> u32 {
 //   Rs(11:8) 0(7) shift_type(6:5) 1(4) Rm(3:0)
 
 #[inline]
-fn dp_reg_shift_by_reg(opcode: u32, shift_type: u32, rd: Register, rm: Register, rs: Register) -> u32 {
+fn dp_reg_shift_by_reg(
+    opcode: u32,
+    shift_type: u32,
+    rd: Register,
+    rm: Register,
+    rs: Register,
+) -> u32 {
     (COND_AL << 28)
         | (opcode << 21)
         | (rn(rd) << 12)
@@ -228,7 +241,15 @@ fn check_rot4(rot4: u32) {
 }
 
 #[inline]
-fn dp_imm(cond: u32, opcode: u32, set_flags: bool, rd: Register, rn_reg: Register, imm8: u32, rot4: u32) -> u32 {
+fn dp_imm(
+    cond: u32,
+    opcode: u32,
+    set_flags: bool,
+    rd: Register,
+    rn_reg: Register,
+    imm8: u32,
+    rot4: u32,
+) -> u32 {
     check_imm8(imm8);
     check_rot4(rot4);
     (cond << 28)
@@ -301,12 +322,7 @@ pub(crate) fn cmp_imm8(rn_reg: Register, imm8: u32) -> u32 {
 
 pub(crate) fn mul(rd: Register, rm: Register, rs: Register) -> u32 {
     debug_assert!(rd != rm, "ARMv6 mul requires Rd != Rm (got {:?})", rd);
-    (COND_AL << 28)
-        | (0b000_0000 << 21)
-        | (rn(rd) << 16)
-        | (rn(rs) << 8)
-        | (0b1001 << 4)
-        | rn(rm)
+    (COND_AL << 28) | (0b000_0000 << 21) | (rn(rd) << 16) | (rn(rs) << 8) | (0b1001 << 4) | rn(rm)
 }
 
 pub(crate) fn mla(rd: Register, rm: Register, rs: Register, rn_acc: Register) -> u32 {
@@ -339,7 +355,11 @@ fn ldr_str_off12(load: bool, rd_or_rs: Register, rn_base: Register, offset: i32)
     } else {
         (0u32, (-offset) as u32)
     };
-    assert!(abs < (1 << 12), "ldr/str offset {} doesn't fit in 12 bits", offset);
+    assert!(
+        abs < (1 << 12),
+        "ldr/str offset {} doesn't fit in 12 bits",
+        offset
+    );
     (COND_AL << 28)
         | (0b01 << 26)
         | (0u32 << 25)                // I=0 (immediate)
@@ -408,11 +428,17 @@ pub(crate) fn pop(reglist: u16) -> u32 {
 /// target instruction. Must be a multiple of 4 and fit in a signed
 /// 26-bit range.
 pub(crate) fn b_cond(cond: u32, byte_offset_from_pc8: i32) -> u32 {
-    assert!(byte_offset_from_pc8 % 4 == 0, "branch offset must be word-aligned");
+    assert!(
+        byte_offset_from_pc8 % 4 == 0,
+        "branch offset must be word-aligned"
+    );
     let word_off = byte_offset_from_pc8 >> 2;
     let min = -(1 << 23);
     let max = (1 << 23) - 1;
-    assert!(word_off >= min && word_off <= max, "branch offset out of range");
+    assert!(
+        word_off >= min && word_off <= max,
+        "branch offset out of range"
+    );
     let imm24 = (word_off as u32) & 0x00FF_FFFF;
     (cond << 28)
         | (0b101 << 25)
@@ -425,7 +451,10 @@ pub(crate) fn b(byte_offset_from_pc8: i32) -> u32 {
 }
 
 pub(crate) fn bl(byte_offset_from_pc8: i32) -> u32 {
-    assert!(byte_offset_from_pc8 % 4 == 0, "branch offset must be word-aligned");
+    assert!(
+        byte_offset_from_pc8 % 4 == 0,
+        "branch offset must be word-aligned"
+    );
     let word_off = byte_offset_from_pc8 >> 2;
     let imm24 = (word_off as u32) & 0x00FF_FFFF;
     (COND_AL << 28)
@@ -440,22 +469,14 @@ pub(crate) fn bl(byte_offset_from_pc8: i32) -> u32 {
 //   cond(31:28) 0001 0010(27:20) (1111 1111 1111)(19:8) 0001(7:4) Rm(3:0)
 
 pub(crate) fn bx(rm: Register) -> u32 {
-    (COND_AL << 28)
-        | (0b0001_0010 << 20)
-        | (0xFFF << 8)
-        | (0b0001 << 4)
-        | rn(rm)
+    (COND_AL << 28) | (0b0001_0010 << 20) | (0xFFF << 8) | (0b0001 << 4) | rn(rm)
 }
 
 // BLX <Rm>: like BX but also writes (next-instr-addr) to LR — a true
 // register-indirect call. Encoding (A4-16):
 //   cond(31:28) 0001 0010(27:20) (1111 1111 1111)(19:8) 0011(7:4) Rm(3:0)
 pub(crate) fn blx(rm: Register) -> u32 {
-    (COND_AL << 28)
-        | (0b0001_0010 << 20)
-        | (0xFFF << 8)
-        | (0b0011 << 4)
-        | rn(rm)
+    (COND_AL << 28) | (0b0001_0010 << 20) | (0xFFF << 8) | (0b0011 << 4) | rn(rm)
 }
 
 // ===================== conditional move-immediate (for Cset) =====================
@@ -469,10 +490,7 @@ pub(crate) fn blx(rm: Register) -> u32 {
 // Returns both instructions. Caller pushes both into the code buffer.
 
 pub(crate) fn cset(rd: Register, cond: u32) -> [u32; 2] {
-    [
-        mov_imm8(rd, 0),
-        mov_imm8_cond_rot(cond, rd, 1, 0),
-    ]
+    [mov_imm8(rd, 0), mov_imm8_cond_rot(cond, rd, 1, 0)]
 }
 
 // ===================== synthetic: 32-bit immediate load =====================
@@ -495,9 +513,9 @@ pub(crate) fn load_imm32(buf: &mut Vec<u32>, rd: Register, imm32: u32) {
     let b2 = (imm32 >> 16) & 0xFF;
     let b3 = (imm32 >> 24) & 0xFF;
     buf.push(mov_imm8_rot(rd, b0, 0));
-    buf.push(orr_imm8_rot(rd, rd, b1, 12));   // rotate-right 24 bits
-    buf.push(orr_imm8_rot(rd, rd, b2, 8));    // rotate-right 16 bits
-    buf.push(orr_imm8_rot(rd, rd, b3, 4));    // rotate-right  8 bits
+    buf.push(orr_imm8_rot(rd, rd, b1, 12)); // rotate-right 24 bits
+    buf.push(orr_imm8_rot(rd, rd, b2, 8)); // rotate-right 16 bits
+    buf.push(orr_imm8_rot(rd, rd, b3, 4)); // rotate-right  8 bits
 }
 
 // ===================== PC-relative load (literal pool) =====================
@@ -516,7 +534,7 @@ pub(crate) fn ldr_pc_rel(rd: Register, byte_offset_from_pc8: i32) -> u32 {
     ldr_str_off12(true, rd, Register::PC, byte_offset_from_pc8)
 }
 
-// ===================== CP15 — DSB on ARMv6 =====================
+// ===================== CP15 — system control ops on ARMv6 =====================
 //
 // ARMv6 has no dedicated `dsb` instruction; the canonical sync
 // barrier is `mcr p15, 0, Rd, c7, c10, 4`. The Rd value is ignored
@@ -528,5 +546,21 @@ pub(crate) fn ldr_pc_rel(rd: Register, byte_offset_from_pc8: i32) -> u32 {
 //
 // For DSB: cond=AL, opcode_1=0, CRn=7, Rd=0, coproc=15, opcode_2=4,
 // CRm=10 — bit-pattern `0xee07_0f9a`.
+
+pub(crate) fn mcr_cp15(rd: Register, crn: u32, crm: u32, opcode_2: u32) -> u32 {
+    debug_assert!(crn < 16);
+    debug_assert!(crm < 16);
+    debug_assert!(opcode_2 < 8);
+    (COND_AL << 28)
+        | (0b1110 << 24)
+        | (0u32 << 21)                 // opcode_1 = 0
+        | (0u32 << 20)                 // L=0 (MCR)
+        | (crn << 16)
+        | (rn(rd) << 12)
+        | (15u32 << 8)                 // coproc = p15
+        | (opcode_2 << 5)
+        | (1u32 << 4)
+        | crm
+}
 
 pub(crate) const DSB_SY: u32 = 0xee07_0f9a;

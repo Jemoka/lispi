@@ -6,54 +6,78 @@
 //! closure/macro construction, quasiquote — falls through to `escape`,
 //! which hands the whole sexp back to the interpreter at run time.
 
-use alloc::rc::Rc;
-use alloc::vec::Vec;
+use super::ir::{IRSegment, IRStatement, VReg};
+use super::scope::{JitImage, Resolution};
 use crate::language::ast::Value;
 use crate::language::special::Special;
 use crate::language::syscalls::Syscall;
-use super::ir::{IRSegment, IRStatement, VReg};
-use super::scope::{JitImage, Resolution};
+use alloc::rc::Rc;
+use alloc::vec::Vec;
 
 /// Extract the single argument of `(op arg)` without evaluating it.
 /// Returns Err on wrong arity.
 fn arg1(sexp: &Rc<Value>) -> Result<Rc<Value>, &'static str> {
-    if !sexp.nth_exists(1) { return Err("expected 1 argument, got fewer."); }
-    if sexp.nth_exists(2)  { return Err("expected 1 argument, got more."); }
+    if !sexp.nth_exists(1) {
+        return Err("expected 1 argument, got fewer.");
+    }
+    if sexp.nth_exists(2) {
+        return Err("expected 1 argument, got more.");
+    }
     Ok(sexp.nth(1))
 }
 
 /// Extract the two arguments of `(op a b)` without evaluating them.
 fn arg2(sexp: &Rc<Value>) -> Result<(Rc<Value>, Rc<Value>), &'static str> {
-    if !sexp.nth_exists(2) { return Err("expected 2 arguments, got fewer."); }
-    if sexp.nth_exists(3)  { return Err("expected 2 arguments, got more."); }
+    if !sexp.nth_exists(2) {
+        return Err("expected 2 arguments, got fewer.");
+    }
+    if sexp.nth_exists(3) {
+        return Err("expected 2 arguments, got more.");
+    }
     Ok((sexp.nth(1), sexp.nth(2)))
 }
 
 /// Extract the three arguments of `(op a b c)` without evaluating them.
 fn arg3(sexp: &Rc<Value>) -> Result<(Rc<Value>, Rc<Value>, Rc<Value>), &'static str> {
-    if !sexp.nth_exists(3) { return Err("expected 3 arguments, got fewer."); }
-    if sexp.nth_exists(4)  { return Err("expected 3 arguments, got more."); }
+    if !sexp.nth_exists(3) {
+        return Err("expected 3 arguments, got fewer.");
+    }
+    if sexp.nth_exists(4) {
+        return Err("expected 3 arguments, got more.");
+    }
     Ok((sexp.nth(1), sexp.nth(2), sexp.nth(3)))
 }
 
 /// Extract the four arguments of `(op a b c d)` without evaluating them.
 fn arg4(sexp: &Rc<Value>) -> Result<(Rc<Value>, Rc<Value>, Rc<Value>, Rc<Value>), &'static str> {
-    if !sexp.nth_exists(4) { return Err("expected 4 arguments, got fewer."); }
-    if sexp.nth_exists(5)  { return Err("expected 4 arguments, got more."); }
+    if !sexp.nth_exists(4) {
+        return Err("expected 4 arguments, got fewer.");
+    }
+    if sexp.nth_exists(5) {
+        return Err("expected 4 arguments, got more.");
+    }
     Ok((sexp.nth(1), sexp.nth(2), sexp.nth(3), sexp.nth(4)))
 }
 
 /// Assert no arguments (`(op)`). Used by 0-arg syscalls.
 fn arg0(sexp: &Rc<Value>) -> Result<(), &'static str> {
-    if sexp.nth_exists(1) { return Err("expected 0 arguments, got more."); }
+    if sexp.nth_exists(1) {
+        return Err("expected 0 arguments, got more.");
+    }
     Ok(())
 }
 
 impl IRSegment {
     /// Helper: cgen a unary form `(op x)` and emit `build(dst, x)`.
-    fn unop<F>(&mut self, sexp: &Rc<Value>, scope: &mut JitImage<'_>, build: F)
-        -> Result<VReg, &'static str>
-    where F: FnOnce(VReg, VReg) -> IRStatement {
+    fn unop<F>(
+        &mut self,
+        sexp: &Rc<Value>,
+        scope: &mut JitImage<'_>,
+        build: F,
+    ) -> Result<VReg, &'static str>
+    where
+        F: FnOnce(VReg, VReg) -> IRStatement,
+    {
         let a = arg1(sexp)?;
         let ra = self.cgen_inner(a, scope)?;
         let r = self.reg();
@@ -62,9 +86,15 @@ impl IRSegment {
     }
 
     /// Helper: cgen a binary form `(op a b)` and emit `build(dst, a, b)`.
-    fn binop<F>(&mut self, sexp: &Rc<Value>, scope: &mut JitImage<'_>, build: F)
-        -> Result<VReg, &'static str>
-    where F: FnOnce(VReg, VReg, VReg) -> IRStatement {
+    fn binop<F>(
+        &mut self,
+        sexp: &Rc<Value>,
+        scope: &mut JitImage<'_>,
+        build: F,
+    ) -> Result<VReg, &'static str>
+    where
+        F: FnOnce(VReg, VReg, VReg) -> IRStatement,
+    {
         let (a, b) = arg2(sexp)?;
         let ra = self.cgen_inner(a, scope)?;
         let rb = self.cgen_inner(b, scope)?;
@@ -74,9 +104,15 @@ impl IRSegment {
     }
 
     /// Helper: cgen a ternary form `(op a b c)` and emit `build(dst, a, b, c)`.
-    fn ternop<F>(&mut self, sexp: &Rc<Value>, scope: &mut JitImage<'_>, build: F)
-        -> Result<VReg, &'static str>
-    where F: FnOnce(VReg, VReg, VReg, VReg) -> IRStatement {
+    fn ternop<F>(
+        &mut self,
+        sexp: &Rc<Value>,
+        scope: &mut JitImage<'_>,
+        build: F,
+    ) -> Result<VReg, &'static str>
+    where
+        F: FnOnce(VReg, VReg, VReg, VReg) -> IRStatement,
+    {
         let (a, b, c) = arg3(sexp)?;
         let ra = self.cgen_inner(a, scope)?;
         let rb = self.cgen_inner(b, scope)?;
@@ -88,9 +124,15 @@ impl IRSegment {
 
     /// Helper: cgen a quaternary form `(op a b c d)` and emit
     /// `build(dst, a, b, c, d)`.
-    fn quadop<F>(&mut self, sexp: &Rc<Value>, scope: &mut JitImage<'_>, build: F)
-        -> Result<VReg, &'static str>
-    where F: FnOnce(VReg, VReg, VReg, VReg, VReg) -> IRStatement {
+    fn quadop<F>(
+        &mut self,
+        sexp: &Rc<Value>,
+        scope: &mut JitImage<'_>,
+        build: F,
+    ) -> Result<VReg, &'static str>
+    where
+        F: FnOnce(VReg, VReg, VReg, VReg, VReg) -> IRStatement,
+    {
         let (a, b, c, d) = arg4(sexp)?;
         let ra = self.cgen_inner(a, scope)?;
         let rb = self.cgen_inner(b, scope)?;
@@ -103,9 +145,10 @@ impl IRSegment {
 
     /// Helper for 0-arg syscalls: check arity, mint a dst VReg, emit
     /// `build(dst)`.
-    fn nop_op<F>(&mut self, sexp: &Rc<Value>, build: F)
-        -> Result<VReg, &'static str>
-    where F: FnOnce(VReg) -> IRStatement {
+    fn nop_op<F>(&mut self, sexp: &Rc<Value>, build: F) -> Result<VReg, &'static str>
+    where
+        F: FnOnce(VReg) -> IRStatement,
+    {
         arg0(sexp)?;
         let r = self.reg();
         self.emit(build(r.clone()));
@@ -162,7 +205,11 @@ impl IRSegment {
 
     /// some specialization for special forms and syscalls, everything else we don't know
     /// about is handed off to the intepreter
-    pub(super) fn specialize(&mut self, value: Rc<Value>, scope: &mut JitImage<'_>) -> Result<VReg, &'static str> {
+    pub(super) fn specialize(
+        &mut self,
+        value: Rc<Value>,
+        scope: &mut JitImage<'_>,
+    ) -> Result<VReg, &'static str> {
         let car = match &*value {
             Value::Cons(a, _) => Rc::clone(a),
             _ => unreachable!("specialize should only be called on cons lists!"),
@@ -398,7 +445,7 @@ impl IRSegment {
             // Escaped (caught by the `_` arm below): everything that
             // hits the Rust heap allocator, walks a list, or borrows
             // an Array — `alloc32`, `free32`, `read32`, `fill32`,
-            // `ldr`, `str`, `unpack1to16`.
+            // `ldr`, `unpack1to16`.
 
             // 0-arg (pure asm / MMIO)
             Value::Syscall(Syscall::DSB)             => self.nop_op(&value, IRStatement::SysDsb),
@@ -417,8 +464,9 @@ impl IRSegment {
             // 2-arg
             Value::Syscall(Syscall::Put32)    => self.binop(&value, scope, IRStatement::SysPut32),
 
-            // 3-arg (memset-shaped)
+            // 3-arg (memset/copy-shaped)
             Value::Syscall(Syscall::Zero32)   => self.ternop(&value, scope, IRStatement::SysZero32),
+            Value::Syscall(Syscall::Str)      => self.ternop(&value, scope, IRStatement::SysStr),
 
             // 4-arg (memset-shaped)
             Value::Syscall(Syscall::Full32)   => self.quadop(&value, scope, IRStatement::SysFull32),

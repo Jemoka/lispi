@@ -202,6 +202,7 @@ impl JittedClosure {
         let mir2 = super::optimize2::optimize2(mir);
         let rir: super::ir3::RIRSegment = mir2.into();
         let lir = super::regalloc::regalloc(rir);
+        let lir = super::optimize4::optimize4(lir);
         let executor = JitExecutor::new(lir);
 
         // Pre-build the param-frame Environment once: callers push it

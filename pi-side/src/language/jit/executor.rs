@@ -27,10 +27,12 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use crate::comm::uart;
 use crate::language::ast::Value;
 use crate::language::environment::{Binding, Image};
 use crate::language::execute::evaluate;
 use crate::language::number::Number;
+use crate::utils::memory::put32;
 
 use super::encodings::*;
 use super::ir::Name;
@@ -132,9 +134,9 @@ static mut LOCALS: *mut Vec<Option<Binding>> = core::ptr::null_mut();
 /// avoids the multi-hundred-megabyte allocator churn that a per-call
 /// fresh `Vec<ShadowSlot>` of `SLOT_CAPACITY` entries would cause for
 /// recursion-heavy programs like fib.
-static mut SLOT_BACKING:       Option<Vec<ShadowSlot>>          = None;
-static mut SLOT_VALUE_BACKING: Option<Vec<Option<Rc<Value>>>>   = None;
-static mut LOCALS_BACKING:     Option<Vec<Option<Binding>>>     = None;
+static mut SLOT_BACKING: Option<Vec<ShadowSlot>> = None;
+static mut SLOT_VALUE_BACKING: Option<Vec<Option<Rc<Value>>>> = None;
+static mut LOCALS_BACKING: Option<Vec<Option<Binding>>> = None;
 /// Global save/restore stack for param-binding `Rc<Value>` snapshots
 /// taken around each `JittedClosure` dispatch. Using a static-mut Vec
 /// instead of a per-JC `RefCell<Vec<_>>` skips the borrow-counter
@@ -158,7 +160,9 @@ unsafe fn slot_at(id: u32) -> *mut ShadowSlot {
 
 unsafe fn alloc_slot() -> u32 {
     let id = unsafe { SLOT_BUMP };
-    unsafe { SLOT_BUMP += 1; }
+    unsafe {
+        SLOT_BUMP += 1;
+    }
     if (id as usize) >= unsafe { SLOTS_LEN } {
         panic!("JIT: slot table exhausted");
     }
@@ -180,7 +184,9 @@ unsafe fn locals() -> &'static mut Vec<Option<Binding>> {
 fn locals_set(id: usize, b: Binding) {
     unsafe {
         let v = locals();
-        if id >= v.len() { v.resize(id + 1, None); }
+        if id >= v.len() {
+            v.resize(id + 1, None);
+        }
         v[id] = Some(b);
     }
 }
@@ -227,7 +233,12 @@ fn intern_value(v: &Value) -> u32 {
                 (*slot).src = slot_values().len() as u32 - 1;
             }
             Value::Array(_) => {
-                (*slot).tag = TAG_EXTERN;
+                (*slot).tag = TAG_ARRAY;
+                if let Value::Array(a) = v {
+                    let b = a.borrow();
+                    (*slot).payload = b.as_ptr() as u32;
+                    (*slot).extra = b.len() as u32;
+                }
                 slot_values().push(Some(Rc::new(v.clone())));
                 (*slot).src = slot_values().len() as u32 - 1;
             }
@@ -298,12 +309,16 @@ fn reify_slot(id: u32) -> Value {
 //   blx r12
 
 unsafe extern "C" fn h_push_frame() -> u32 {
-    unsafe { image_ref().push_frame(); }
+    unsafe {
+        image_ref().push_frame();
+    }
     0
 }
 
 unsafe extern "C" fn h_pop_frame() -> u32 {
-    unsafe { image_ref().pop_frame(); }
+    unsafe {
+        image_ref().pop_frame();
+    }
     0
 }
 
@@ -417,7 +432,9 @@ unsafe extern "C" fn h_intern_value_ptr(value_ptr: *const Value) -> u32 {
         let key = value_ptr as usize;
         let cache = &mut *core::ptr::addr_of_mut!(LITERAL_SLOT_CACHE);
         for &(k, slot) in cache.iter() {
-            if k == key { return slot; }
+            if k == key {
+                return slot;
+            }
         }
         // Cache miss: assign a fresh literal-zone slot id and intern
         // the value into it. Reserved zone is `1 .. LITERAL_ZONE_LEN`;
@@ -435,16 +452,30 @@ unsafe extern "C" fn h_intern_value_ptr(value_ptr: *const Value) -> u32 {
                 Value::Number(Number::Integer(_)) => TAG_INT,
                 Value::Number(Number::Unsigned(_)) => TAG_UNSIGNED,
                 Value::Number(Number::Addr(_)) => TAG_ADDR,
+                Value::Array(_) => TAG_ARRAY,
                 _ => TAG_EXTERN,
             };
             (*s).payload = match v_ref {
-                Value::Bool(b) => if *b { 1 } else { 0 },
+                Value::Bool(b) => {
+                    if *b {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 Value::Number(Number::Integer(i)) => *i as u32,
                 Value::Number(Number::Unsigned(u)) => *u,
                 Value::Number(Number::Addr(a)) => *a as u32,
+                Value::Array(a) => {
+                    let b = a.borrow();
+                    (*s).extra = b.len() as u32;
+                    b.as_ptr() as u32
+                }
                 _ => 0,
             };
-            (*s).extra = 0;
+            if !matches!(v_ref, Value::Array(_)) {
+                (*s).extra = 0;
+            }
             (*s).src = src_idx;
             id
         } else {
@@ -498,7 +529,9 @@ unsafe extern "C" fn h_box_uns(payload: u32) -> u32 {
 
 unsafe extern "C" fn h_truthy(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 0; }
+        if slot_id == 0 {
+            return 0;
+        }
         let s = &*slot_at(slot_id);
         let truthy = match s.tag {
             TAG_NIL => false,
@@ -512,7 +545,9 @@ unsafe extern "C" fn h_truthy(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_lognot(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return h_box_int(1); }
+        if slot_id == 0 {
+            return h_box_int(1);
+        }
         let s = &*slot_at(slot_id);
         let truthy = match s.tag {
             TAG_NIL => false,
@@ -542,7 +577,9 @@ unsafe extern "C" fn h_modsi3(a: i32, b: i32) -> i32 {
 
 unsafe extern "C" fn h_nullp(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 1; }
+        if slot_id == 0 {
+            return 1;
+        }
         let s = &*slot_at(slot_id);
         if s.tag == TAG_NIL { 1 } else { 0 }
     }
@@ -550,9 +587,13 @@ unsafe extern "C" fn h_nullp(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_car(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 0; }
+        if slot_id == 0 {
+            return 0;
+        }
         let s = &*slot_at(slot_id);
-        if s.tag == TAG_CONS { return s.payload; }
+        if s.tag == TAG_CONS {
+            return s.payload;
+        }
         if s.tag == TAG_EXTERN {
             let v = reify_slot(slot_id);
             return intern_value(&v.car());
@@ -563,9 +604,13 @@ unsafe extern "C" fn h_car(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_cdr(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 0; }
+        if slot_id == 0 {
+            return 0;
+        }
         let s = &*slot_at(slot_id);
-        if s.tag == TAG_CONS { return s.extra; }
+        if s.tag == TAG_CONS {
+            return s.extra;
+        }
         if s.tag == TAG_EXTERN {
             let v = reify_slot(slot_id);
             return intern_value(&v.cdr());
@@ -619,6 +664,61 @@ unsafe extern "C" fn h_escape(slot_id: u32) -> u32 {
 /// dispatched callsites.
 static mut DISPATCH_CACHE_VEC: Vec<Option<Rc<super::jit::JittedClosure>>> = Vec::new();
 
+unsafe fn run_jc_with_args(
+    jc: &super::jit::JittedClosure,
+    arg_vals: Vec<Value>,
+    image: &mut Image,
+) -> u32 {
+    unsafe {
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        for b in &jc.param_bindings {
+            snap_stack.push((*b.as_ptr()).clone());
+        }
+        for (i, val) in arg_vals.into_iter().enumerate() {
+            *jc.param_bindings[i].as_ptr() = Rc::new(val);
+        }
+        if jc.executor.has_escape {
+            image.push_env(&jc.env);
+            image.push_env(&jc.param_env);
+        }
+        let result = jc.executor.run(image);
+        if jc.executor.has_escape {
+            image.pop_frame();
+            image.pop_frame();
+        }
+        for i in (0..jc.param_bindings.len()).rev() {
+            *jc.param_bindings[i].as_ptr() = snap_stack.pop().unwrap();
+        }
+        match result {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
+}
+
+unsafe fn run_jc_unary(jc: &super::jit::JittedClosure, arg: Value, image: &mut Image) -> u32 {
+    unsafe {
+        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
+        let saved = (*jc.param_bindings[0].as_ptr()).clone();
+        snap_stack.push(saved);
+        *jc.param_bindings[0].as_ptr() = Rc::new(arg);
+        if jc.executor.has_escape {
+            image.push_env(&jc.env);
+            image.push_env(&jc.param_env);
+        }
+        let result = jc.executor.run(image);
+        if jc.executor.has_escape {
+            image.pop_frame();
+            image.pop_frame();
+        }
+        let restored = snap_stack.pop().unwrap();
+        *jc.param_bindings[0].as_ptr() = restored;
+        match result {
+            Ok(v) => intern_value(&v),
+            Err(_) => 0,
+        }
+    }
+}
 
 /// Dispatch through an already-resolved `JittedClosure` — eval args,
 /// snapshot bindings, run, restore. Same as the body of
@@ -627,85 +727,69 @@ static mut DISPATCH_CACHE_VEC: Vec<Option<Rc<super::jit::JittedClosure>>> = Vec:
 /// if arg eval / type check fails.
 unsafe fn dispatch_cached(sexp: &Value, jc: &Rc<super::jit::JittedClosure>) -> Option<u32> {
     unsafe {
-    let image = image_ref();
-    let arity = jc.params.len();
-    // Snapshot + write inline for the common arity-1 case (fib), Vec
-    // for >1. For arity 1 we avoid the arg_vals Vec entirely.
-    if arity == 1 {
-        let v = evaluate(sexp.nth(1), image).ok()?;
-        if !jc.input_types[0].accepts(&v) { return None; }
-        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
-        let saved = (*jc.param_bindings[0].as_ptr()).clone();
-        snap_stack.push(saved);
-        *jc.param_bindings[0].as_ptr() = Rc::new(v);
-        image.push_env(&jc.env);
-        image.push_env(&jc.param_env);
-        let result = jc.executor.run(image);
-        image.pop_frame();
-        image.pop_frame();
-        let restored = snap_stack.pop().unwrap();
-        *jc.param_bindings[0].as_ptr() = restored;
-        return Some(match result { Ok(v) => intern_value(&v), Err(_) => 0 });
-    }
-    // Generic arity path.
-    let mut arg_vals: Vec<Value> = Vec::with_capacity(arity);
-    for i in 0..arity {
-        if !sexp.nth_exists(i + 1) { return None; }
-        arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
-    }
-    for (i, v) in arg_vals.iter().enumerate() {
-        if !jc.input_types[i].accepts(v) { return None; }
-    }
-    let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
-    for b in &jc.param_bindings {
-        let cur = (*b.as_ptr()).clone();
-        snap_stack.push(cur);
-    }
-    for (i, val) in arg_vals.into_iter().enumerate() {
-        *jc.param_bindings[i].as_ptr() = Rc::new(val);
-    }
-    image.push_env(&jc.env);
-    image.push_env(&jc.param_env);
-    let result = jc.executor.run(image);
-    image.pop_frame();
-    image.pop_frame();
-    for i in (0..jc.param_bindings.len()).rev() {
-        let saved = snap_stack.pop().unwrap();
-        *jc.param_bindings[i].as_ptr() = saved;
-    }
-    Some(match result { Ok(v) => intern_value(&v), Err(_) => 0 })
+        let image = image_ref();
+        let arity = jc.params.len();
+        // Snapshot + write inline for the common arity-1 case (fib), Vec
+        // for >1. For arity 1 we avoid the arg_vals Vec entirely.
+        if arity == 1 {
+            let v = evaluate(sexp.nth(1), image).ok()?;
+            if !jc.input_types[0].accepts(&v) {
+                return None;
+            }
+            return Some(run_jc_unary(jc, v, image));
+        }
+        // Generic arity path.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(arity);
+        for i in 0..arity {
+            if !sexp.nth_exists(i + 1) {
+                return None;
+            }
+            arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
+        }
+        for (i, v) in arg_vals.iter().enumerate() {
+            if !jc.input_types[i].accepts(v) {
+                return None;
+            }
+        }
+        Some(run_jc_with_args(jc, arg_vals, image))
     }
 }
 
 /// Like `try_autojit_call` but on success also returns the resolved
 /// `JittedClosure` so `h_escape` can stash it in the per-slot cache.
-unsafe fn try_autojit_call_returning_jc(sexp: &Value) -> Option<(u32, Rc<super::jit::JittedClosure>)> {
+unsafe fn try_autojit_call_returning_jc(
+    sexp: &Value,
+) -> Option<(u32, Rc<super::jit::JittedClosure>)> {
     unsafe {
-    let executor_ptr = CURRENT_EXECUTOR;
-    if executor_ptr.is_null() { return None; }
-    let (head, _) = match sexp {
-        Value::Cons(car, cdr) => (car.clone(), cdr.clone()),
-        _ => return None,
-    };
-    let sym = match &*head {
-        Value::Symbol(s) => s.clone(),
-        _ => return None,
-    };
-    let image = image_ref();
-    let resolved = image.get(&sym)?;
-    let closure = match &*resolved {
-        Value::Closure(c) => c.clone(),
-        _ => return None,
-    };
-    let mut arg_vals: Vec<Value> = Vec::with_capacity(closure.params.len());
-    for i in 0..closure.params.len() {
-        if !sexp.nth_exists(i + 1) { return None; }
-        arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
-    }
-    let executor: &JitExecutor = &*executor_ptr;
-    let jc = executor.get_or_compile_callee(&closure, &arg_vals, image)?;
-    let slot = dispatch_cached(sexp, &jc)?;
-    Some((slot, jc))
+        let executor_ptr = CURRENT_EXECUTOR;
+        if executor_ptr.is_null() {
+            return None;
+        }
+        let (head, _) = match sexp {
+            Value::Cons(car, cdr) => (car.clone(), cdr.clone()),
+            _ => return None,
+        };
+        let sym = match &*head {
+            Value::Symbol(s) => s.clone(),
+            _ => return None,
+        };
+        let image = image_ref();
+        let resolved = image.get(&sym)?;
+        let closure = match &*resolved {
+            Value::Closure(c) => c.clone(),
+            _ => return None,
+        };
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(closure.params.len());
+        for i in 0..closure.params.len() {
+            if !sexp.nth_exists(i + 1) {
+                return None;
+            }
+            arg_vals.push(evaluate(sexp.nth(i + 1), image).ok()?);
+        }
+        let executor: &JitExecutor = &*executor_ptr;
+        let jc = executor.get_or_compile_callee(&closure, &arg_vals, image)?;
+        let slot = dispatch_cached(sexp, &jc)?;
+        Some((slot, jc))
     }
 }
 
@@ -775,7 +859,9 @@ unsafe fn try_autojit_call(sexp: &Value) -> Option<u32> {
         snap_stack.push(cur);
     }
     for (i, val) in arg_vals.into_iter().enumerate() {
-        unsafe { *jc.param_bindings[i].as_ptr() = Rc::new(val); }
+        unsafe {
+            *jc.param_bindings[i].as_ptr() = Rc::new(val);
+        }
     }
 
     // Push the closure's captured env + the pre-built param frame
@@ -791,7 +877,9 @@ unsafe fn try_autojit_call(sexp: &Value) -> Option<u32> {
     // Pop the saved values back into the param Bindings.
     for i in (0..jc.param_bindings.len()).rev() {
         let saved = snap_stack.pop().unwrap();
-        unsafe { *jc.param_bindings[i].as_ptr() = saved; }
+        unsafe {
+            *jc.param_bindings[i].as_ptr() = saved;
+        }
     }
 
     Some(match result {
@@ -826,16 +914,6 @@ unsafe fn h_call_common(binding_ptr: *const RefCell<Rc<Value>>, args: &[u32]) ->
         // 1) Read the binding's current value.
         let rc_ptr = (*binding_ptr).as_ptr();
         let value_rc: Rc<Value> = (*rc_ptr).clone();
-        let closure = match &*value_rc {
-            Value::Closure(c) => c.clone(),
-            _ => {
-                // Not a closure — interpreter fallback. Build (<value> args...).
-                return h_call_fallback(&value_rc, args);
-            }
-        };
-        if closure.params.len() != args.len() {
-            return h_call_fallback(&value_rc, args);
-        }
 
         // 2) Reify args into Values.
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
@@ -843,17 +921,37 @@ unsafe fn h_call_common(binding_ptr: *const RefCell<Rc<Value>>, args: &[u32]) ->
             arg_vals.push(reify_slot(s));
         }
 
-        // 3) Get/compile the JC.
-        let executor_ptr = CURRENT_EXECUTOR;
-        if executor_ptr.is_null() {
-            return h_call_fallback(&value_rc, args);
-        }
-        let executor: &JitExecutor = &*executor_ptr;
-        let image = image_ref();
-        let jc = match executor.get_or_compile_callee(&closure, &arg_vals, image) {
-            Some(j) => j,
-            None => return h_call_fallback(&value_rc, args),
+        // 3) Get/compile the JC, or use an already-jitted binding.
+        let _jc_keepalive: Option<Rc<super::jit::JittedClosure>>;
+        let jc_ptr: *const super::jit::JittedClosure;
+        match &*value_rc {
+            Value::Closure(c) => {
+                if c.params.len() != args.len() {
+                    return h_call_fallback(&value_rc, args);
+                }
+                let executor_ptr = CURRENT_EXECUTOR;
+                if executor_ptr.is_null() {
+                    return h_call_fallback(&value_rc, args);
+                }
+                let executor: &JitExecutor = &*executor_ptr;
+                let image = image_ref();
+                let jc = match executor.get_or_compile_callee(c, &arg_vals, image) {
+                    Some(j) => j,
+                    None => return h_call_fallback(&value_rc, args),
+                };
+                jc_ptr = Rc::as_ptr(&jc);
+                _jc_keepalive = Some(jc);
+            }
+            Value::JittedClosure(jc) => {
+                if jc.params.len() != args.len() {
+                    return h_call_fallback(&value_rc, args);
+                }
+                jc_ptr = Rc::as_ptr(jc);
+                _jc_keepalive = Some(jc.clone());
+            }
+            _ => return h_call_fallback(&value_rc, args),
         };
+        let jc: &super::jit::JittedClosure = &*jc_ptr;
 
         // 4) Type guard.
         for (i, v) in arg_vals.iter().enumerate() {
@@ -863,28 +961,7 @@ unsafe fn h_call_common(binding_ptr: *const RefCell<Rc<Value>>, args: &[u32]) ->
         }
 
         // 5) Snapshot param bindings, swap in new values, dispatch.
-        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
-        for b in &jc.param_bindings {
-            let cur = (*b.as_ptr()).clone();
-            snap_stack.push(cur);
-        }
-        for (i, val) in arg_vals.into_iter().enumerate() {
-            *jc.param_bindings[i].as_ptr() = Rc::new(val);
-        }
-        image.push_env(&jc.env);
-        image.push_env(&jc.param_env);
-        let result = jc.executor.run(image);
-        image.pop_frame();
-        image.pop_frame();
-        for i in (0..jc.param_bindings.len()).rev() {
-            let saved = snap_stack.pop().unwrap();
-            *jc.param_bindings[i].as_ptr() = saved;
-        }
-
-        match result {
-            Ok(v) => intern_value(&v),
-            Err(_) => 0,
-        }
+        run_jc_with_args(jc, arg_vals, image_ref())
     }
 }
 
@@ -922,12 +999,6 @@ unsafe extern "C" fn h_call_fast(
 
         let jc: &super::jit::JittedClosure = &*(*cc).jc_ptr;
 
-        // Reify args.
-        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
-        for &s in args {
-            arg_vals.push(reify_slot(s));
-        }
-
         // Arity + type guard. Mismatch here means the binding still
         // points to the same closure but the caller's arg shape no
         // longer matches what the cached JC was specialized for — fall
@@ -935,6 +1006,20 @@ unsafe extern "C" fn h_call_fast(
         if jc.params.len() != args.len() {
             let v = (*cell_ptr).clone();
             return h_call_fallback(&v, args);
+        }
+        if args.len() == 1 {
+            let v = reify_slot(args[0]);
+            if !jc.input_types[0].accepts(&v) {
+                let callee = (*cell_ptr).clone();
+                return h_call_fallback(&callee, args);
+            }
+            return run_jc_unary(jc, v, image_ref());
+        }
+
+        // Reify args.
+        let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len());
+        for &s in args {
+            arg_vals.push(reify_slot(s));
         }
         for (i, v) in arg_vals.iter().enumerate() {
             if !jc.input_types[i].accepts(v) {
@@ -944,27 +1029,7 @@ unsafe extern "C" fn h_call_fast(
         }
 
         // Snapshot + swap + dispatch + restore (same as `h_call`'s tail).
-        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
-        for b in &jc.param_bindings {
-            snap_stack.push((*b.as_ptr()).clone());
-        }
-        for (i, val) in arg_vals.into_iter().enumerate() {
-            *jc.param_bindings[i].as_ptr() = Rc::new(val);
-        }
-        let image_m = image_ref();
-        image_m.push_env(&jc.env);
-        image_m.push_env(&jc.param_env);
-        let result = jc.executor.run(image_m);
-        image_m.pop_frame();
-        image_m.pop_frame();
-        for i in (0..jc.param_bindings.len()).rev() {
-            *jc.param_bindings[i].as_ptr() = snap_stack.pop().unwrap();
-        }
-
-        match result {
-            Ok(v) => intern_value(&v),
-            Err(_) => 0,
-        }
+        run_jc_with_args(jc, arg_vals, image_ref())
     }
 }
 
@@ -1017,6 +1082,57 @@ unsafe extern "C" fn h_call(
         let current_inner: *const Value = Rc::as_ptr(&*cell_ptr);
         let cc: *mut CallCache = (*cache_cell).get();
 
+        if args.len() == 1 {
+            let arg0 = reify_slot(args[0]);
+            let _jc_keepalive: Option<Rc<super::jit::JittedClosure>>;
+            let jc_ptr: *const super::jit::JittedClosure;
+
+            if !(*cc).jc_ptr.is_null() && (*cc).value_inner_ptr == current_inner {
+                jc_ptr = (*cc).jc_ptr;
+                _jc_keepalive = None;
+            } else {
+                let value_rc: Rc<Value> = (*cell_ptr).clone();
+                let jc_rc = match &*value_rc {
+                    Value::Closure(c) => {
+                        if c.params.len() != 1 {
+                            return h_call_fallback(&value_rc, args);
+                        }
+                        let executor_ptr = CURRENT_EXECUTOR;
+                        if executor_ptr.is_null() {
+                            return h_call_fallback(&value_rc, args);
+                        }
+                        let executor: &JitExecutor = &*executor_ptr;
+                        match executor.get_or_compile_callee(
+                            c,
+                            core::slice::from_ref(&arg0),
+                            image_ref(),
+                        ) {
+                            Some(j) => j,
+                            None => return h_call_fallback(&value_rc, args),
+                        }
+                    }
+                    Value::JittedClosure(jc) => {
+                        if jc.params.len() != 1 {
+                            return h_call_fallback(&value_rc, args);
+                        }
+                        jc.clone()
+                    }
+                    _ => return h_call_fallback(&value_rc, args),
+                };
+                (*cc).jc_ptr = Rc::as_ptr(&jc_rc);
+                (*cc).value_inner_ptr = current_inner;
+                jc_ptr = Rc::as_ptr(&jc_rc);
+                _jc_keepalive = Some(jc_rc);
+            }
+
+            let jc: &super::jit::JittedClosure = &*jc_ptr;
+            if !jc.input_types[0].accepts(&arg0) {
+                let v = (*cell_ptr).clone();
+                return h_call_fallback(&v, args);
+            }
+            return run_jc_unary(jc, arg0, image_ref());
+        }
+
         // Reify args once. Used both for slow-path get_or_compile_callee
         // (it needs Values for input-type derivation) and for type-guard
         // checks on the fast path.
@@ -1034,22 +1150,29 @@ unsafe extern "C" fn h_call(
             _jc_keepalive = None; // executor's `specializations` holds it
         } else {
             let value_rc: Rc<Value> = (*cell_ptr).clone();
-            let closure = match &*value_rc {
-                Value::Closure(c) => c.clone(),
+            let jc_rc = match &*value_rc {
+                Value::Closure(c) => {
+                    if c.params.len() != args.len() {
+                        return h_call_fallback(&value_rc, args);
+                    }
+                    let executor_ptr = CURRENT_EXECUTOR;
+                    if executor_ptr.is_null() {
+                        return h_call_fallback(&value_rc, args);
+                    }
+                    let executor: &JitExecutor = &*executor_ptr;
+                    let image_m = image_ref();
+                    match executor.get_or_compile_callee(c, &arg_vals, image_m) {
+                        Some(j) => j,
+                        None => return h_call_fallback(&value_rc, args),
+                    }
+                }
+                Value::JittedClosure(jc) => {
+                    if jc.params.len() != args.len() {
+                        return h_call_fallback(&value_rc, args);
+                    }
+                    jc.clone()
+                }
                 _ => return h_call_fallback(&value_rc, args),
-            };
-            if closure.params.len() != args.len() {
-                return h_call_fallback(&value_rc, args);
-            }
-            let executor_ptr = CURRENT_EXECUTOR;
-            if executor_ptr.is_null() {
-                return h_call_fallback(&value_rc, args);
-            }
-            let executor: &JitExecutor = &*executor_ptr;
-            let image_m = image_ref();
-            let jc_rc = match executor.get_or_compile_callee(&closure, &arg_vals, image_m) {
-                Some(j) => j,
-                None => return h_call_fallback(&value_rc, args),
             };
             // Populate cache for next-time fast path.
             (*cc).jc_ptr = Rc::as_ptr(&jc_rc);
@@ -1071,27 +1194,7 @@ unsafe extern "C" fn h_call(
         }
 
         // Snapshot + swap + dispatch + restore.
-        let snap_stack = &mut *core::ptr::addr_of_mut!(BINDING_SNAPSHOT_STACK);
-        for b in &jc.param_bindings {
-            snap_stack.push((*b.as_ptr()).clone());
-        }
-        for (i, val) in arg_vals.into_iter().enumerate() {
-            *jc.param_bindings[i].as_ptr() = Rc::new(val);
-        }
-        let image_m = image_ref();
-        image_m.push_env(&jc.env);
-        image_m.push_env(&jc.param_env);
-        let result = jc.executor.run(image_m);
-        image_m.pop_frame();
-        image_m.pop_frame();
-        for i in (0..jc.param_bindings.len()).rev() {
-            *jc.param_bindings[i].as_ptr() = snap_stack.pop().unwrap();
-        }
-
-        match result {
-            Ok(v) => intern_value(&v),
-            Err(_) => 0,
-        }
+        run_jc_with_args(jc, arg_vals, image_ref())
     }
 }
 
@@ -1109,7 +1212,9 @@ unsafe extern "C" fn h_hits(slot_id: u32) -> u32 {
 
 unsafe extern "C" fn h_unbox(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 0; }
+        if slot_id == 0 {
+            return 0;
+        }
         let s = &*slot_at(slot_id);
         s.payload
     }
@@ -1187,7 +1292,9 @@ unsafe extern "C" fn h_array_putidx(arr_slot: u32, i_slot: u32, val_slot: u32) -
     match &v {
         Value::Array(a) => {
             let mut b = a.borrow_mut();
-            if i < b.len() { b[i] = val; }
+            if i < b.len() {
+                b[i] = val;
+            }
         }
         Value::Number(Number::Addr(base)) => unsafe {
             let p = *base as *mut u32;
@@ -1228,7 +1335,9 @@ unsafe extern "C" fn h_array_fillidx(arr_slot: u32, off_slot: u32, list_slot: u3
                 Value::Cons(head, tail) => {
                     if let Value::Number(n) = head.as_ref() {
                         let u = n.as_u32().unwrap_or(0);
-                        if off + i < b.len() { b[off + i] = u; }
+                        if off + i < b.len() {
+                            b[off + i] = u;
+                        }
                     }
                     i += 1;
                     cur = tail.as_ref().clone();
@@ -1240,7 +1349,12 @@ unsafe extern "C" fn h_array_fillidx(arr_slot: u32, off_slot: u32, list_slot: u3
     0
 }
 
-unsafe extern "C" fn h_array_fullidx(arr_slot: u32, off_slot: u32, n_slot: u32, val_slot: u32) -> u32 {
+unsafe extern "C" fn h_array_fullidx(
+    arr_slot: u32,
+    off_slot: u32,
+    n_slot: u32,
+    val_slot: u32,
+) -> u32 {
     let v = reify_slot(arr_slot);
     let off = unsafe { reify_to_u32(off_slot) } as i32 as usize;
     let n = unsafe { reify_to_u32(n_slot) } as i32 as usize;
@@ -1248,7 +1362,9 @@ unsafe extern "C" fn h_array_fullidx(arr_slot: u32, off_slot: u32, n_slot: u32, 
     if let Value::Array(a) = &v {
         let mut b = a.borrow_mut();
         for i in 0..n {
-            if off + i < b.len() { b[off + i] = val; }
+            if off + i < b.len() {
+                b[off + i] = val;
+            }
         }
     }
     0
@@ -1257,7 +1373,9 @@ unsafe extern "C" fn h_array_fullidx(arr_slot: u32, off_slot: u32, n_slot: u32, 
 /// Extract u32 payload from a slot (assumes imm/box tag).
 unsafe fn reify_to_u32(slot_id: u32) -> u32 {
     unsafe {
-        if slot_id == 0 { return 0; }
+        if slot_id == 0 {
+            return 0;
+        }
         let s = &*slot_at(slot_id);
         match s.tag {
             TAG_INT | TAG_UNSIGNED | TAG_ADDR | TAG_BOOL => s.payload,
@@ -1266,18 +1384,79 @@ unsafe fn reify_to_u32(slot_id: u32) -> u32 {
     }
 }
 
-// syscall helpers — stubs; populated by phase 6.
-unsafe extern "C" fn h_uart_init() -> u32 { 0 }
-unsafe extern "C" fn h_uart_get8() -> u32 { 0 }
-unsafe extern "C" fn h_uart_put8(_b: u32) -> u32 { 0 }
-unsafe extern "C" fn h_delay(_n: u32) -> u32 { 0 }
-unsafe extern "C" fn h_monitor_clear() -> u32 { 0 }
-unsafe extern "C" fn h_monitor_get() -> u32 { 0 }
-unsafe extern "C" fn h_monitor_stop() -> u32 { 0 }
-unsafe extern "C" fn h_zero32(_a: u32, _b: u32, _c: u32) -> u32 { 0 }
-unsafe extern "C" fn h_full32(_a: u32, _b: u32, _c: u32, _v: u32) -> u32 { 0 }
+// syscall helpers. These mirror the specialized syscalls in
+// `language::syscalls`; allocator/list/array-shaped syscalls still
+// escape through the interpreter.
+unsafe extern "C" fn h_uart_init() -> u32 {
+    uart::init();
+    0
+}
+
+unsafe extern "C" fn h_uart_get8() -> u32 {
+    uart::get8() as u32
+}
+
+unsafe extern "C" fn h_uart_put8(b: u32) -> u32 {
+    uart::put8(b as u8);
+    0
+}
+
+unsafe extern "C" fn h_monitor_get() -> u32 {
+    let clocks = unsafe {
+        let val: u32;
+        core::arch::asm!("mrc p15, 0, {val}, c15, c12, 1", val = out(reg) val);
+        val
+    };
+
+    let icachemiss = unsafe {
+        let val: u32;
+        core::arch::asm!("mrc p15, 0, {val}, c15, c12, 2", val = out(reg) val);
+        val
+    };
+
+    let branchmiss = unsafe {
+        let val: u32;
+        core::arch::asm!("mrc p15, 0, {val}, c15, c12, 3", val = out(reg) val);
+        val
+    };
+
+    intern_value(&Value::cons(
+        Value::Number(Number::Unsigned(clocks)),
+        Value::cons(
+            Value::Number(Number::Unsigned(icachemiss)),
+            Value::cons(Value::Number(Number::Unsigned(branchmiss)), Value::Nil),
+        ),
+    ))
+}
+
+unsafe extern "C" fn h_zero32(a: u32, b: u32, c: u32) -> u32 {
+    let base = a as usize;
+    let offset = b as i32 as usize;
+    let count = c as i32 as usize;
+    for i in 0..count {
+        unsafe { put32(base + (offset + i) * 4, 0) };
+    }
+    0
+}
+
+unsafe extern "C" fn h_full32(a: u32, b: u32, c: u32, v: u32) -> u32 {
+    let base = a as usize;
+    let offset = b as i32 as usize;
+    let count = c as i32 as usize;
+    let dst = (base + offset * 4) as *mut u32;
+    let slice = unsafe { core::slice::from_raw_parts_mut(dst, count) };
+    slice.fill(v);
+    0
+}
 
 // =================== JitExecutor ===================
+
+fn lir_has_escape(seg: &LIRSegment) -> bool {
+    seg.blocks
+        .iter()
+        .filter(|block| !block.dead)
+        .any(|block| block.instructions.iter().any(|i| matches!(i, Instr::Escape)))
+}
 
 pub(crate) struct JitExecutor {
     /// Emitted ARM machine code (one u32 per instruction word, plus
@@ -1300,6 +1479,10 @@ pub(crate) struct JitExecutor {
     call_caches: Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
     /// Byte offset of the entry point in `code` (always 0 for now).
     entry_offset: usize,
+    /// Whether this body can bounce back into the interpreter. If not,
+    /// call helpers can skip pushing closure/param environments around
+    /// nested `run()` calls; emitted code uses baked binding pointers.
+    has_escape: bool,
     /// Auto-JIT cache. Populated lazily when a JIT body Escapes a call
     /// whose head resolves to a `Value::Closure` — we compile that
     /// callee specialized to its actual arg types, stash the
@@ -1316,15 +1499,13 @@ pub(crate) struct JitExecutor {
     /// this set falls back to the interpreter for that one frame —
     /// avoiding infinite-compile when a closure body Escapes a call
     /// to itself.
-    currently_compiling: core::cell::RefCell<
-        alloc::collections::BTreeSet<super::jit::CalleeKey>,
-    >,
+    currently_compiling: core::cell::RefCell<alloc::collections::BTreeSet<super::jit::CalleeKey>>,
 }
 
 impl JitExecutor {
     pub(crate) fn new(seg: LIRSegment) -> Self {
-        let (code, captures, value_literals, name_literals, call_caches)
-            = emit_segment(&seg);
+        let has_escape = lir_has_escape(&seg);
+        let (code, captures, value_literals, name_literals, call_caches) = emit_segment(&seg);
 
         // We just wrote `code` via normal Rust stores — those land in
         // the D-cache. With D-cache enabled (post `mmu_init`) the
@@ -1352,6 +1533,7 @@ impl JitExecutor {
             name_literals,
             call_caches,
             entry_offset: 0,
+            has_escape,
             specializations: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
             currently_compiling: core::cell::RefCell::new(alloc::collections::BTreeSet::new()),
         }
@@ -1368,10 +1550,8 @@ impl JitExecutor {
         args: &[crate::language::ast::Value],
         image: &mut Image,
     ) -> Option<Rc<super::jit::JittedClosure>> {
-        let types: Vec<super::jit::InputType> = args
-            .iter()
-            .map(super::jit::InputType::of)
-            .collect();
+        let types: Vec<super::jit::InputType> =
+            args.iter().map(super::jit::InputType::of).collect();
         // Build the key with `types` moved in — no clone. On the
         // hot cache-hit path that's the only allocation we'd be
         // paying for, so eliminating it matters.
@@ -1409,12 +1589,7 @@ impl JitExecutor {
             return None;
         }
 
-        let result = super::jit::JittedClosure::compile(
-            closure,
-            args,
-            key.types.clone(),
-            image,
-        );
+        let result = super::jit::JittedClosure::compile(closure, args, key.types.clone(), image);
 
         if let Ok(mut compiling) = self.currently_compiling.try_borrow_mut() {
             compiling.remove(&key);
@@ -1458,21 +1633,23 @@ impl JitExecutor {
         // 64KB allocation, which was making recursion-heavy programs
         // like fib catastrophically slow.
 
-        let saved_image  = unsafe { IMAGE };
-        let saved_base   = unsafe { SLOTS_BASE };
-        let saved_len    = unsafe { SLOTS_LEN };
-        let saved_bump   = unsafe { SLOT_BUMP };
+        let saved_image = unsafe { IMAGE };
+        let saved_base = unsafe { SLOTS_BASE };
+        let saved_len = unsafe { SLOTS_LEN };
+        let saved_bump = unsafe { SLOT_BUMP };
         let saved_values = unsafe { SLOT_VALUES };
         let saved_locals = unsafe { LOCALS };
         // For nested calls, save the Vec lengths too so we can roll
         // back to them on exit (releasing this frame's allocations
         // without freeing the underlying allocation).
         let saved_values_len: usize = unsafe {
-            if SLOT_VALUES.is_null() { 0 } else { (*SLOT_VALUES).len() }
+            if SLOT_VALUES.is_null() {
+                0
+            } else {
+                (*SLOT_VALUES).len()
+            }
         };
-        let saved_locals_len: usize = unsafe {
-            if LOCALS.is_null() { 0 } else { (*LOCALS).len() }
-        };
+        let saved_locals_len: usize = unsafe { if LOCALS.is_null() { 0 } else { (*LOCALS).len() } };
 
         let first_entry = unsafe { CURRENT_EXECUTOR.is_null() };
 
@@ -1486,9 +1663,9 @@ impl JitExecutor {
                 // sidestep the Rust 2024 `static_mut_refs` lint while
                 // staying single-threaded-safe (the whole runtime is
                 // single-threaded by construction).
-                let s_ptr  = core::ptr::addr_of_mut!(SLOT_BACKING);
+                let s_ptr = core::ptr::addr_of_mut!(SLOT_BACKING);
                 let sv_ptr = core::ptr::addr_of_mut!(SLOT_VALUE_BACKING);
-                let l_ptr  = core::ptr::addr_of_mut!(LOCALS_BACKING);
+                let l_ptr = core::ptr::addr_of_mut!(LOCALS_BACKING);
                 if (*s_ptr).is_none() {
                     *s_ptr = Some(alloc::vec![
                         ShadowSlot { tag: TAG_NIL, payload: 0, extra: 0, src: 0 };
@@ -1542,9 +1719,7 @@ impl JitExecutor {
 
         let code_ptr = self.code.as_ptr();
         let entry_addr = unsafe { code_ptr.add(self.entry_offset / 4) };
-        let entry: unsafe extern "C" fn() -> u32 = unsafe {
-            core::mem::transmute(entry_addr)
-        };
+        let entry: unsafe extern "C" fn() -> u32 = unsafe { core::mem::transmute(entry_addr) };
 
         let return_slot = unsafe { entry() };
         let result = if (return_slot as usize) < unsafe { SLOTS_LEN } {
@@ -1735,7 +1910,7 @@ fn emit_slot_ptr(e: &mut Emitter, dst_ptr: Register, slot_id: Register, _tmp: Re
 /// 7 words. Replaces a 2-word bl + the helper's prologue/body/epilogue.
 fn emit_inline_nullp(e: &mut Emitter) {
     emit_slot_ptr(e, Register::R12, Register::R0, Register::R12);
-    e.push(ldr_off12(Register::R12, Register::R12, 0));   // tag
+    e.push(ldr_off12(Register::R12, Register::R12, 0)); // tag
     e.push(cmp_imm8(Register::R12, TAG_NIL));
     e.push(mov_imm8(Register::R0, 0));
     e.push(mov_imm8_cond_rot(COND_EQ, Register::R0, 1, 0));
@@ -1763,16 +1938,16 @@ fn emit_inline_nullp(e: &mut Emitter) {
 ///   done:
 fn emit_inline_truthy(e: &mut Emitter) {
     emit_slot_ptr(e, Register::R12, Register::R0, Register::R12);
-    e.push(ldr_off12(Register::R1, Register::R12, 0));        // tag
-    e.push(ldr_off12(Register::R2, Register::R12, 4));        // payload
+    e.push(ldr_off12(Register::R1, Register::R12, 0)); // tag
+    e.push(ldr_off12(Register::R2, Register::R12, 4)); // payload
     // Fully predicated to avoid branches:
     //   r0 := 1  (default truthy)
     //   if tag == NIL    : r0 := 0
     //   else if tag < 5  : r0 := (payload != 0) ? 1 : 0
     //   else             : r0 := 1
-    e.push(mov_imm8(Register::R0, 1));                         // default truthy
+    e.push(mov_imm8(Register::R0, 1)); // default truthy
     e.push(cmp_imm8(Register::R1, TAG_NIL));
-    e.push(mov_imm8_cond_rot(COND_EQ, Register::R0, 0, 0));    // NIL → 0
+    e.push(mov_imm8_cond_rot(COND_EQ, Register::R0, 0, 0)); // NIL → 0
     // Reset flags for next check
     e.push(cmp_imm8(Register::R1, 5));
     // tag < 5 (LO) AND non-NIL handled above: now zero r0 iff payload==0
@@ -1843,6 +2018,78 @@ fn emit_inline_box_int(e: &mut Emitter) {
     e.push(str_off12(Register::R2, Register::R12, 0));
     e.push(str_off12(Register::R0, Register::R12, 4));
     e.push(mov(Register::R0, Register::R1));
+}
+
+fn emit_inline_delay(e: &mut Emitter) {
+    e.push(cmp_imm8(Register::R0, 0));
+
+    let ble_idx = e.code.len();
+    e.push(0);
+
+    let loop_idx = e.code.len();
+    e.push(add_imm8(Register::R1, Register::R1, 0));
+    e.push(sub_imm8(Register::R0, Register::R0, 1));
+    e.push(cmp_imm8(Register::R0, 0));
+
+    let bgt_idx = e.code.len();
+    e.push(0);
+
+    let done_idx = e.code.len();
+
+    let ble_pc_byte = (ble_idx as i32) * 4;
+    let done_byte = (done_idx as i32) * 4;
+    e.code[ble_idx] = b_cond(COND_LE, done_byte - ble_pc_byte - 8);
+
+    let bgt_pc_byte = (bgt_idx as i32) * 4;
+    let loop_byte = (loop_idx as i32) * 4;
+    e.code[bgt_idx] = b_cond(COND_GT, loop_byte - bgt_pc_byte - 8);
+}
+
+fn emit_inline_monitor_clear(e: &mut Emitter) {
+    const PMU_CLEAR_SET_CONFIG: u32 = 0x0060_0007;
+    let pool_idx = e.intern_pool(LiteralKind::Imm32(PMU_CLEAR_SET_CONFIG));
+    e.emit_pool_load(Register::R12, pool_idx);
+    e.push(mcr_cp15(Register::R12, 15, 12, 0));
+}
+
+fn emit_inline_monitor_stop(e: &mut Emitter) {
+    e.push(mov_imm8(Register::R0, 0));
+    e.push(mcr_cp15(Register::R0, 15, 12, 0));
+}
+
+fn emit_inline_strmem(e: &mut Emitter) {
+    emit_slot_ptr(e, Register::R12, Register::R0, Register::R12);
+    e.push(ldr_off12(Register::R0, Register::R12, 4));
+    e.push(add_lsl_imm(Register::R0, Register::R0, Register::R1, 2));
+
+    emit_slot_ptr(e, Register::R12, Register::R2, Register::R12);
+    e.push(ldr_off12(Register::R1, Register::R12, 4));
+    e.push(ldr_off12(Register::R2, Register::R12, 8));
+    e.push(cmp_imm8(Register::R2, 0));
+
+    let beq_idx = e.code.len();
+    e.push(0);
+
+    let loop_idx = e.code.len();
+    e.push(ldr_off12(Register::R3, Register::R1, 0));
+    e.push(str_off12(Register::R3, Register::R0, 0));
+    e.push(add_imm8(Register::R1, Register::R1, 4));
+    e.push(add_imm8(Register::R0, Register::R0, 4));
+    e.push(sub_imm8(Register::R2, Register::R2, 1));
+    e.push(cmp_imm8(Register::R2, 0));
+
+    let bne_idx = e.code.len();
+    e.push(0);
+
+    let done_idx = e.code.len();
+
+    let beq_pc_byte = (beq_idx as i32) * 4;
+    let done_byte = (done_idx as i32) * 4;
+    e.code[beq_idx] = b_cond(COND_EQ, done_byte - beq_pc_byte - 8);
+
+    let bne_pc_byte = (bne_idx as i32) * 4;
+    let loop_byte = (loop_idx as i32) * 4;
+    e.code[bne_idx] = b_cond(COND_NE, loop_byte - bne_pc_byte - 8);
 }
 
 /// Build the prologue save mask: callee-saves used + LR. The pool
@@ -1995,7 +2242,11 @@ fn size_instr(i: &Instruction) -> usize {
                 ImmNumber::Unsigned(u) => *u,
                 ImmNumber::Addr(a) => *a as u32,
             };
-            if bits < 0x100 || encode_rotated_imm8(bits).is_some() { 1 } else { 4 }
+            if bits < 0x100 || encode_rotated_imm8(bits).is_some() {
+                1
+            } else {
+                4
+            }
         }
         // LdrValuePtr is: ldr r0,=val + ldr r12,=fn + blx r12 + mov d,r0 = 4
         LdrValuePtr(..) => 4,
@@ -2008,13 +2259,13 @@ fn size_instr(i: &Instruction) -> usize {
         LdrCapture(..) => 4,
         StrCapture(..) => 4, // ldr r0,=bind + ldr r12,=fn + blx + mov
         // helper calls: ldr r12, =&fn (1) + blx r12 (1) = 2
-        BindLocal | LoadLocal | StoreLocal | UnboxLocal
-        | PushFrame | PopFrame | Xor
-        | Div | Mod | Cons
-        | Array | Full | Unpack | GetIdx | PutIdx | ReadIdx | FillIdx | FullIdx
-        | Hits | Escape
-        | UartInit | UartGet8 | UartPut8 | Delay
-        | ClearMonitor | GetMonitor | StopMonitor | Zero32 | Full32 => 2,
+        BindLocal | LoadLocal | StoreLocal | UnboxLocal | PushFrame | PopFrame | Xor | Div
+        | Mod | Cons | Array | Full | Unpack | GetIdx | PutIdx | ReadIdx | FillIdx | FullIdx
+        | Hits | Escape | UartInit | UartGet8 | UartPut8 | GetMonitor | Zero32 | Full32 => 2,
+        StrMem => 19,
+        Delay => 6,
+        ClearMonitor => 2,
+        StopMonitor => 2,
         // Call expands inline to: ldr [r3], cmp, beq, ldr=fast, blx,
         // b, ldr=slow, blx — 8 words.
         Call => 8,
@@ -2023,10 +2274,10 @@ fn size_instr(i: &Instruction) -> usize {
         // LdrCallCachePtr is also a single pool ldr.
         LdrCallCachePtr(..) => 1,
         // inline ops — sized to match the bodies above.
-        Nullp     => 7,
-        Truthy    => 11,
-        LogNot    => 12,
-        Box       => 11,
+        Nullp => 7,
+        Truthy => 11,
+        LogNot => 12,
+        Box => 11,
         // cset is mov + cond-mov = 2
         Cset(..) => 2,
         // LdrOffset: off=0 is a direct ldr (1); off!=0 is a shadow-
@@ -2043,15 +2294,15 @@ fn size_instr(i: &Instruction) -> usize {
     }
 }
 
-fn emit_segment(seg: &LIRSegment)
-    -> (
-        Vec<u32>,
-        Vec<Binding>,
-        Vec<Rc<Value>>,
-        Vec<Rc<Name>>,
-        Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
-    )
-{
+fn emit_segment(
+    seg: &LIRSegment,
+) -> (
+    Vec<u32>,
+    Vec<Binding>,
+    Vec<Rc<Value>>,
+    Vec<Rc<Name>>,
+    Vec<alloc::boxed::Box<core::cell::UnsafeCell<CallCache>>>,
+) {
     let mut e = Emitter::new();
 
     // Total frame slots = call_args region (bottom) + spill slots (above).
@@ -2064,8 +2315,10 @@ fn emit_segment(seg: &LIRSegment)
     // is stable, unlike Vec<CallCache>'s inner buffer).
     e.call_caches.reserve_exact(seg.call_cache_count as usize);
     for _ in 0..seg.call_cache_count {
-        e.call_caches.push(alloc::boxed::Box::new(
-            core::cell::UnsafeCell::new(CallCache::null())));
+        e.call_caches
+            .push(alloc::boxed::Box::new(core::cell::UnsafeCell::new(
+                CallCache::null(),
+            )));
     }
     let total_slots = seg.spill_slots + seg.call_args_max;
 
@@ -2078,7 +2331,9 @@ fn emit_segment(seg: &LIRSegment)
     e.block_offsets = Vec::with_capacity(seg.blocks.len());
     for blk in &seg.blocks {
         e.block_offsets.push(offset_words * 4);
-        if blk.dead { continue; }
+        if blk.dead {
+            continue;
+        }
         for instr in &blk.instructions {
             offset_words += size_instr_with_epilogue(instr, total_slots, prologue_mask);
         }
@@ -2090,18 +2345,24 @@ fn emit_segment(seg: &LIRSegment)
     // swapped for PC (so the popped saved-LR value lands in PC — that
     // executes the return). NOT setting both — that would overcount.
     e.spill_slots_bytes = aligned_spill_bytes(total_slots, prologue_mask);
-    e.epilogue_mask = (prologue_mask & !(1u16 << Register::LR.bit()))
-        | (1u16 << Register::PC.bit());
+    e.epilogue_mask =
+        (prologue_mask & !(1u16 << Register::LR.bit())) | (1u16 << Register::PC.bit());
 
     // Emit prologue.
     emit_prologue(&mut e, total_slots, prologue_mask);
 
     // --- Pass 2: emit ---
     for (bi, blk) in seg.blocks.iter().enumerate() {
-        if blk.dead { continue; }
+        if blk.dead {
+            continue;
+        }
         // sanity: code length matches the offset we predicted
-        debug_assert_eq!(e.code.len(), e.block_offsets[bi] / 4,
-            "block {} offset mismatch", bi);
+        debug_assert_eq!(
+            e.code.len(),
+            e.block_offsets[bi] / 4,
+            "block {} offset mismatch",
+            bi
+        );
         for instr in &blk.instructions {
             emit_instr(&mut e, instr);
         }
@@ -2124,10 +2385,8 @@ fn emit_segment(seg: &LIRSegment)
             LiteralKind::HelperFn(addr) => *addr,
             LiteralKind::SlotsBase => unsafe { SLOTS_BASE as u32 },
             LiteralKind::Imm32(v) => *v,
-            LiteralKind::SlotsBaseStaticAddr =>
-                core::ptr::addr_of!(SLOTS_BASE) as u32,
-            LiteralKind::SlotBumpStaticAddr =>
-                core::ptr::addr_of!(SLOT_BUMP) as u32,
+            LiteralKind::SlotsBaseStaticAddr => core::ptr::addr_of!(SLOTS_BASE) as u32,
+            LiteralKind::SlotBumpStaticAddr => core::ptr::addr_of!(SLOT_BUMP) as u32,
             LiteralKind::CallCacheAddr(idx) => {
                 // Each Box<UnsafeCell<CallCache>> is heap-stable —
                 // its address remains valid for the executor's lifetime
@@ -2152,11 +2411,19 @@ fn emit_segment(seg: &LIRSegment)
     }
 
     // Move pinned objects out to the executor.
-    let JitOwned { captures, value_literals, name_literals } =
-        collect_pinned(&e.pool_entries);
+    let JitOwned {
+        captures,
+        value_literals,
+        name_literals,
+    } = collect_pinned(&e.pool_entries);
 
-    (e.code, captures, value_literals, name_literals,
-     core::mem::take(&mut e.call_caches))
+    (
+        e.code,
+        captures,
+        value_literals,
+        name_literals,
+        core::mem::take(&mut e.call_caches),
+    )
 }
 
 struct JitOwned {
@@ -2177,15 +2444,31 @@ fn collect_pinned(pool: &[LiteralKind]) -> JitOwned {
             _ => {}
         }
     }
-    JitOwned { captures, value_literals, name_literals }
+    JitOwned {
+        captures,
+        value_literals,
+        name_literals,
+    }
 }
 
 fn decode_reg(n: u32) -> Register {
     match n {
-        0 => Register::R0, 1 => Register::R1, 2 => Register::R2, 3 => Register::R3,
-        4 => Register::R4, 5 => Register::R5, 6 => Register::R6, 7 => Register::R7,
-        8 => Register::R8, 9 => Register::R9, 10 => Register::R10, 11 => Register::R11,
-        12 => Register::R12, 13 => Register::SP, 14 => Register::LR, 15 => Register::PC,
+        0 => Register::R0,
+        1 => Register::R1,
+        2 => Register::R2,
+        3 => Register::R3,
+        4 => Register::R4,
+        5 => Register::R5,
+        6 => Register::R6,
+        7 => Register::R7,
+        8 => Register::R8,
+        9 => Register::R9,
+        10 => Register::R10,
+        11 => Register::R11,
+        12 => Register::R12,
+        13 => Register::SP,
+        14 => Register::LR,
+        15 => Register::PC,
         _ => unreachable!(),
     }
 }
@@ -2211,8 +2494,9 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             // Yields a fresh slot id in d. Sized to 4 words.
             let val_pool = e.intern_pool(LiteralKind::Value(Rc::new(v.clone())));
             e.emit_pool_load(Register::R0, val_pool);
-            let fn_pool = e.intern_pool(LiteralKind::HelperFn(
-                fn_addr_ptr(h_intern_value_ptr as unsafe extern "C" fn(*const Value) -> u32 as *const ())));
+            let fn_pool = e.intern_pool(LiteralKind::HelperFn(fn_addr_ptr(
+                h_intern_value_ptr as unsafe extern "C" fn(*const Value) -> u32 as *const (),
+            )));
             e.emit_pool_load(Register::R12, fn_pool);
             e.push(blx(Register::R12));
             if *d != Register::R0 {
@@ -2246,8 +2530,10 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             //   mov d, r0   (if d != r0)  ; (1, only if needed)
             let bind_pool = e.intern_pool(LiteralKind::Binding(b.clone()));
             e.emit_pool_load(Register::R0, bind_pool);
-            let fn_pool = e.intern_pool(LiteralKind::HelperFn(
-                fn_addr_ptr(h_load_capture_slot as unsafe extern "C" fn(*const RefCell<Rc<Value>>) -> u32 as *const ())));
+            let fn_pool = e.intern_pool(LiteralKind::HelperFn(fn_addr_ptr(
+                h_load_capture_slot as unsafe extern "C" fn(*const RefCell<Rc<Value>>) -> u32
+                    as *const (),
+            )));
             e.emit_pool_load(Register::R12, fn_pool);
             e.push(blx(Register::R12));
             if *d != Register::R0 {
@@ -2263,8 +2549,10 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             e.push(mov(Register::R1, *src));
             let bind_pool = e.intern_pool(LiteralKind::Binding(b.clone()));
             e.emit_pool_load(Register::R0, bind_pool);
-            let fn_pool = e.intern_pool(LiteralKind::HelperFn(
-                fn_addr_ptr(h_store_capture as unsafe extern "C" fn(*mut RefCell<Rc<Value>>, u32) -> u32 as *const ())));
+            let fn_pool = e.intern_pool(LiteralKind::HelperFn(fn_addr_ptr(
+                h_store_capture as unsafe extern "C" fn(*mut RefCell<Rc<Value>>, u32) -> u32
+                    as *const (),
+            )));
             e.emit_pool_load(Register::R12, fn_pool);
             e.push(blx(Register::R12));
         }
@@ -2297,16 +2585,16 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             e.push(str_off12(*r, Register::SP, off));
         }
 
-        Add(d, a, b)    => e.push(add(*d, *a, *b)),
-        Sub(d, a, b)    => e.push(sub(*d, *a, *b)),
-        Mul(d, a, b)    => e.push(mul(*d, *a, *b)),
+        Add(d, a, b) => e.push(add(*d, *a, *b)),
+        Sub(d, a, b) => e.push(sub(*d, *a, *b)),
+        Mul(d, a, b) => e.push(mul(*d, *a, *b)),
         Lshift(d, a, b) => e.push(lsl(*d, *a, *b)),
         Rshift(d, a, b) => e.push(lsr(*d, *a, *b)),
-        BinOr(d, a, b)  => e.push(orr(*d, *a, *b)),
+        BinOr(d, a, b) => e.push(orr(*d, *a, *b)),
         BinAnd(d, a, b) => e.push(and(*d, *a, *b)),
-        Mvn(d, a)       => e.push(mvn(*d, *a)),
+        Mvn(d, a) => e.push(mvn(*d, *a)),
 
-        Cmp(a, b)    => e.push(cmp(*a, *b)),
+        Cmp(a, b) => e.push(cmp(*a, *b)),
         CmpImm(a, n) => {
             let bits: u32 = match n {
                 ImmNumber::Integer(i) => *i as u32,
@@ -2329,29 +2617,29 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
 
         // ---- helper calls ----
         PushFrame => e.emit_helper_call(fn_addr_ptr(h_push_frame as *const ())),
-        PopFrame  => e.emit_helper_call(fn_addr_ptr(h_pop_frame as *const ())),
+        PopFrame => e.emit_helper_call(fn_addr_ptr(h_pop_frame as *const ())),
         BindLocal => e.emit_helper_call(fn_addr_ptr(h_bind_local as *const ())),
         LoadLocal => e.emit_helper_call(fn_addr_ptr(h_load_local as *const ())),
         StoreLocal => e.emit_helper_call(fn_addr_ptr(h_store_local as *const ())),
         UnboxLocal => e.emit_helper_call(fn_addr_ptr(h_unbox_local as *const ())),
-        Box       => emit_inline_box_int(e),
-        Truthy    => emit_inline_truthy(e),
-        LogNot    => emit_inline_lognot(e),
-        Xor       => e.emit_helper_call(fn_addr_ptr(h_xor as *const ())),
-        Div       => e.emit_helper_call(fn_addr_ptr(h_divsi3 as *const ())),
-        Mod       => e.emit_helper_call(fn_addr_ptr(h_modsi3 as *const ())),
-        Cons      => e.emit_helper_call(fn_addr_ptr(h_cons as *const ())),
-        Nullp     => emit_inline_nullp(e),
-        Array     => e.emit_helper_call(fn_addr_ptr(h_array_pack as *const ())),
-        Full      => e.emit_helper_call(fn_addr_ptr(h_array_full as *const ())),
-        Unpack    => e.emit_helper_call(fn_addr_ptr(h_array_unpack as *const ())),
-        GetIdx    => e.emit_helper_call(fn_addr_ptr(h_array_getidx as *const ())),
-        PutIdx    => e.emit_helper_call(fn_addr_ptr(h_array_putidx as *const ())),
-        ReadIdx   => e.emit_helper_call(fn_addr_ptr(h_array_readidx as *const ())),
-        FillIdx   => e.emit_helper_call(fn_addr_ptr(h_array_fillidx as *const ())),
-        FullIdx   => e.emit_helper_call(fn_addr_ptr(h_array_fullidx as *const ())),
-        Hits      => e.emit_helper_call(fn_addr_ptr(h_hits as *const ())),
-        Escape    => e.emit_helper_call(fn_addr_ptr(h_escape as *const ())),
+        Box => emit_inline_box_int(e),
+        Truthy => emit_inline_truthy(e),
+        LogNot => emit_inline_lognot(e),
+        Xor => e.emit_helper_call(fn_addr_ptr(h_xor as *const ())),
+        Div => e.emit_helper_call(fn_addr_ptr(h_divsi3 as *const ())),
+        Mod => e.emit_helper_call(fn_addr_ptr(h_modsi3 as *const ())),
+        Cons => e.emit_helper_call(fn_addr_ptr(h_cons as *const ())),
+        Nullp => emit_inline_nullp(e),
+        Array => e.emit_helper_call(fn_addr_ptr(h_array_pack as *const ())),
+        Full => e.emit_helper_call(fn_addr_ptr(h_array_full as *const ())),
+        Unpack => e.emit_helper_call(fn_addr_ptr(h_array_unpack as *const ())),
+        GetIdx => e.emit_helper_call(fn_addr_ptr(h_array_getidx as *const ())),
+        PutIdx => e.emit_helper_call(fn_addr_ptr(h_array_putidx as *const ())),
+        ReadIdx => e.emit_helper_call(fn_addr_ptr(h_array_readidx as *const ())),
+        FillIdx => e.emit_helper_call(fn_addr_ptr(h_array_fillidx as *const ())),
+        FullIdx => e.emit_helper_call(fn_addr_ptr(h_array_fullidx as *const ())),
+        Hits => e.emit_helper_call(fn_addr_ptr(h_hits as *const ())),
+        Escape => e.emit_helper_call(fn_addr_ptr(h_escape as *const ())),
 
         // Inline JC-cache dispatch. Preceding instructions have set:
         //   r0 = binding_ptr, r1 = argc, r2 = argv (sp), r3 = cache_cell.
@@ -2376,8 +2664,8 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             let beq_idx = e.code.len();
             e.push(0);
             // [w3] ldr r12, =h_call_fast
-            let fast_pool = e.intern_pool(LiteralKind::HelperFn(
-                fn_addr_ptr(h_call_fast as *const ())));
+            let fast_pool =
+                e.intern_pool(LiteralKind::HelperFn(fn_addr_ptr(h_call_fast as *const ())));
             e.emit_pool_load(Register::R12, fast_pool);
             // [w4] blx r12
             e.push(blx(Register::R12));
@@ -2386,8 +2674,7 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             e.push(0);
             // [w6] ldr r12, =h_call
             let slow_idx = e.code.len();
-            let slow_pool = e.intern_pool(LiteralKind::HelperFn(
-                fn_addr_ptr(h_call as *const ())));
+            let slow_pool = e.intern_pool(LiteralKind::HelperFn(fn_addr_ptr(h_call as *const ())));
             e.emit_pool_load(Register::R12, slow_pool);
             // [w7] blx r12
             e.push(blx(Register::R12));
@@ -2402,15 +2689,16 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
             let b_target_byte = (done_idx as i32) * 4;
             e.code[b_idx] = b(b_target_byte - b_pc_byte - 8);
         }
-        UartInit  => e.emit_helper_call(fn_addr_ptr(h_uart_init as *const ())),
-        UartGet8  => e.emit_helper_call(fn_addr_ptr(h_uart_get8 as *const ())),
-        UartPut8  => e.emit_helper_call(fn_addr_ptr(h_uart_put8 as *const ())),
-        Delay     => e.emit_helper_call(fn_addr_ptr(h_delay as *const ())),
-        ClearMonitor => e.emit_helper_call(fn_addr_ptr(h_monitor_clear as *const ())),
-        GetMonitor   => e.emit_helper_call(fn_addr_ptr(h_monitor_get as *const ())),
-        StopMonitor  => e.emit_helper_call(fn_addr_ptr(h_monitor_stop as *const ())),
-        Zero32    => e.emit_helper_call(fn_addr_ptr(h_zero32 as *const ())),
-        Full32    => e.emit_helper_call(fn_addr_ptr(h_full32 as *const ())),
+        UartInit => e.emit_helper_call(fn_addr_ptr(h_uart_init as *const ())),
+        UartGet8 => e.emit_helper_call(fn_addr_ptr(h_uart_get8 as *const ())),
+        UartPut8 => e.emit_helper_call(fn_addr_ptr(h_uart_put8 as *const ())),
+        Delay => emit_inline_delay(e),
+        ClearMonitor => emit_inline_monitor_clear(e),
+        GetMonitor => e.emit_helper_call(fn_addr_ptr(h_monitor_get as *const ())),
+        StopMonitor => emit_inline_monitor_stop(e),
+        Zero32 => e.emit_helper_call(fn_addr_ptr(h_zero32 as *const ())),
+        StrMem => emit_inline_strmem(e),
+        Full32 => e.emit_helper_call(fn_addr_ptr(h_full32 as *const ())),
 
         Dsb => e.push(DSB_SY),
         PrefetchFlush => {
@@ -2419,7 +2707,7 @@ fn emit_instr(e: &mut Emitter, instr: &Instruction) {
         }
 
         StackPush(mask) => e.push(push(*mask)),
-        StackPop(mask)  => e.push(pop(*mask)),
+        StackPop(mask) => e.push(pop(*mask)),
 
         B(target) => {
             let here = e.code.len() * 4;

@@ -29,15 +29,15 @@
 //! See `LoadLocal` / `LoadCapture` / `StoreLocal` / `StoreCapture` below.
 //! Lexical scope is tracked via `JitImage` in `super::scope`.
 
+use super::scope::{JitImage, LocalId, Resolution};
+use crate::language::ast::Value;
+use crate::language::constants::SYMB_NAME_LEN;
+use crate::language::environment::Binding;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use heapless::String;
-use crate::language::ast::Value;
-use crate::language::constants::SYMB_NAME_LEN;
-use crate::language::environment::Binding;
-use super::scope::{JitImage, LocalId, Resolution};
 
 /// Symbol name used inside `BindLocal` so the runtime can register the
 /// binding under its source name in the Image's top frame.
@@ -60,7 +60,6 @@ pub(crate) enum IRStatement {
     // The runtime keeps `locals: Vec<Binding>` (length = num_locals,
     // pre-allocated by the call-entry trampoline) and a parallel
     // Image frame stack. The opcodes below tie them together.
-
     /// Push an empty Owned frame onto the runtime Image. Marks entry
     /// of a `let` scope.
     PushFrame,
@@ -75,7 +74,11 @@ pub(crate) enum IRStatement {
     /// code can look up `name` and find this binding. One per
     /// `let`-binding; params are bound by the call-entry trampoline
     /// outside the IR.
-    BindLocal { name: Name, id: LocalId, src: VReg },
+    BindLocal {
+        name: Name,
+        id: LocalId,
+        src: VReg,
+    },
 
     /// Constant-folded `BindLocal`: the source has been collapsed from
     /// a (`Load r, #v`) + (`BindLocal $id, r`) pair into a single
@@ -84,7 +87,11 @@ pub(crate) enum IRStatement {
     /// `(name → locals[id])` in the top frame — just without the
     /// scaffolding Load. Emitted by the SCCP fold pass when the
     /// BindLocal's source VReg is `Constant`.
-    BindImmediate { name: Name, id: LocalId, src: Value },
+    BindImmediate {
+        name: Name,
+        id: LocalId,
+        src: Value,
+    },
 
     /// Load the current value of a local (`param` / `let`) into `dst`.
     /// Lowering bakes the slot address `locals[id].as_ref().as_ptr()`
@@ -105,7 +112,6 @@ pub(crate) enum IRStatement {
 
     // --- arithmetic (assumes numeric inputs; numeric tagging is a
     //     second-pass concern, see header comment) ---
-
     Add(VReg, VReg, VReg),
     Sub(VReg, VReg, VReg),
     Mul(VReg, VReg, VReg),
@@ -115,20 +121,17 @@ pub(crate) enum IRStatement {
     Rshift(VReg, VReg, VReg),
 
     // --- bitwise ---
-
     BinNot(VReg, VReg),
     BinOr(VReg, VReg, VReg),
     BinAnd(VReg, VReg, VReg),
 
     // --- logical (eager — short-circuit forms are control flow) ---
-
     /// Logical NOT, per `is_falsy` semantics: falsy → true, else → false.
     LogNot(VReg, VReg),
     /// Eager XOR — both sides always evaluated.
     Xor(VReg, VReg, VReg),
 
     // --- comparisons (produce Bool) ---
-
     Eq(VReg, VReg, VReg),
     Gt(VReg, VReg, VReg),
     Lt(VReg, VReg, VReg),
@@ -136,20 +139,17 @@ pub(crate) enum IRStatement {
     Lte(VReg, VReg, VReg),
 
     // --- numeric type coercion ---
-
     AsAddr(VReg, VReg),
     AsSigned(VReg, VReg),
     AsUnsigned(VReg, VReg),
 
     // --- cons / list primitives ---
-
     Cons(VReg, VReg, VReg),
     Car(VReg, VReg),
     Cdr(VReg, VReg),
     Nullp(VReg, VReg),
 
     // --- array primitives ---
-
     /// `(array list)` — pack a list of u32s into a new Array.
     Array(VReg, VReg),
     /// `(full n val)` — allocate an array of `n` copies of `val`.
@@ -168,7 +168,6 @@ pub(crate) enum IRStatement {
     FullIdx(VReg, VReg, VReg, VReg, VReg),
 
     // --- introspection ---
-
     /// `(hits f)` — read the closure/macro hit counter as an Unsigned.
     Hits(VReg, VReg),
 
@@ -177,14 +176,17 @@ pub(crate) enum IRStatement {
     // `Br` or `CondBr`; the function returns from whichever open block
     // execution reaches at the end (its final result VReg = whatever
     // cgen returned for the top-level body).
-
     /// Unconditional jump to `target`.
     Br(usize),
 
     /// Conditional jump: if `cond`'s value is *not* falsy (per
     /// `is_falsy`: nil, false, integer 0, unsigned 0), go to `then_blk`;
     /// otherwise go to `else_blk`.
-    CondBr { cond: VReg, then_blk: usize, else_blk: usize },
+    CondBr {
+        cond: VReg,
+        then_blk: usize,
+        else_blk: usize,
+    },
 
     /// SSA phi: `dst` takes the value of `src_a` if the merge block was
     /// reached from `pred_a`, or `src_b` if reached from `pred_b`.
@@ -223,18 +225,19 @@ pub(crate) enum IRStatement {
     SysStopMonitor(VReg),
 
     // 1-arg
-    SysGet32(VReg, VReg),       // dst (u32),  addr
-    SysUartPut8(VReg, VReg),    // dst (nil),  byte
-    SysDelay(VReg, VReg),       // dst (nil),  count
+    SysGet32(VReg, VReg),    // dst (u32),  addr
+    SysUartPut8(VReg, VReg), // dst (nil),  byte
+    SysDelay(VReg, VReg),    // dst (nil),  count
 
     // 2-arg
-    SysPut32(VReg, VReg, VReg),         // dst (nil),  addr, val
+    SysPut32(VReg, VReg, VReg), // dst (nil),  addr, val
 
     // 3-arg
-    SysZero32(VReg, VReg, VReg, VReg),  // dst (nil),  addr, offset, n
+    SysZero32(VReg, VReg, VReg, VReg), // dst (nil),  addr, offset, n
+    SysStr(VReg, VReg, VReg, VReg),    // dst (nil),  addr-or-array, offset, array
 
     // 4-arg
-    SysFull32(VReg, VReg, VReg, VReg, VReg),  // dst (nil), addr, offset, n, val
+    SysFull32(VReg, VReg, VReg, VReg, VReg), // dst (nil), addr, offset, n, val
 
     // --- direct closure call ---
     //
@@ -247,10 +250,13 @@ pub(crate) enum IRStatement {
     /// Supported arity is 1-3 (lower bound: must have ≥1 arg; upper
     /// bound: AAPCS gives us r1..r3 after r0 = binding_ptr). Higher-
     /// arity forms fall back to `Escape` at IR-gen time.
-    Call { dst: VReg, callee: Binding, args: Vec<VReg> },
+    Call {
+        dst: VReg,
+        callee: Binding,
+        args: Vec<VReg>,
+    },
 
     // --- escape hatch ---
-
     /// Evaluate the value in `src` through the interpreter and put the
     /// result in `dst`. Used for anything the JIT can't (or won't)
     /// specialize: function calls, quasiquote, macro expansion, lambda
@@ -284,7 +290,10 @@ impl IRSegment {
     pub(crate) fn new() -> Self {
         IRSegment {
             regs: VReg(0),
-            blocks: vec![IRBasicBlock { statements: Vec::new(), dead: false }],
+            blocks: vec![IRBasicBlock {
+                statements: Vec::new(),
+                dead: false,
+            }],
         }
     }
 
@@ -298,7 +307,10 @@ impl IRSegment {
     /// Push a fresh empty block and return its id. The new block
     /// becomes "current" — subsequent `emit` calls write into it.
     pub(super) fn bpush(&mut self) -> usize {
-        self.blocks.push(IRBasicBlock { statements: Vec::new(), dead: false });
+        self.blocks.push(IRBasicBlock {
+            statements: Vec::new(),
+            dead: false,
+        });
         self.blocks.len() - 1
     }
 
@@ -316,12 +328,7 @@ impl IRSegment {
     /// Emit a phi at the top of `blk`, mint and return its destination
     /// VReg. Asserts the block is empty — phi must be the first
     /// statement in its block (SSA invariant).
-    pub(super) fn phi(
-        &mut self,
-        blk: usize,
-        src_a: (usize, VReg),
-        src_b: (usize, VReg),
-    ) -> VReg {
+    pub(super) fn phi(&mut self, blk: usize, src_a: (usize, VReg), src_b: (usize, VReg)) -> VReg {
         debug_assert!(
             self.blocks[blk].statements.is_empty(),
             "phi must be the first statement in its block"
@@ -343,7 +350,11 @@ impl IRSegment {
     /// convention. Use this from outside the JIT module; use
     /// `cgen_inner` from within specializations that need the result
     /// VReg of a subexpression.
-    pub(crate) fn cgen(&mut self, body: Rc<Value>, scope: &mut JitImage<'_>) -> Result<(), &'static str> {
+    pub(crate) fn cgen(
+        &mut self,
+        body: Rc<Value>,
+        scope: &mut JitImage<'_>,
+    ) -> Result<(), &'static str> {
         let result = self.cgen_inner(body, scope)?;
         self.emit(IRStatement::Ret(result));
         Ok(())
@@ -353,23 +364,27 @@ impl IRSegment {
     /// result of `sexp`. Used internally by `cgen` and by
     /// `specialize` for subexpressions. Does NOT emit a terminator on
     /// the open block; callers compose.
-    pub(super) fn cgen_inner(&mut self, sexp: Rc<Value>, scope: &mut JitImage<'_>) -> Result<VReg, &'static str> {
+    pub(super) fn cgen_inner(
+        &mut self,
+        sexp: Rc<Value>,
+        scope: &mut JitImage<'_>,
+    ) -> Result<VReg, &'static str> {
         match &*sexp {
             // fundamental values — return as-is
             Value::Nil
-                | Value::Bool(_)
-                | Value::Number(_)
-                | Value::String(_)
-                | Value::Closure(_)
-                | Value::Macro(_)
-                | Value::Special(_)
-                | Value::Syscall(_)
-                | Value::Array(_)
-                | Value::JittedClosure(_) => {
-                    let r = self.reg();
-                    self.emit(IRStatement::Load(r.clone(), (*sexp).clone()));
-                    Ok(r)
-                },
+            | Value::Bool(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::Closure(_)
+            | Value::Macro(_)
+            | Value::Special(_)
+            | Value::Syscall(_)
+            | Value::Array(_)
+            | Value::JittedClosure(_) => {
+                let r = self.reg();
+                self.emit(IRStatement::Load(r.clone(), (*sexp).clone()));
+                Ok(r)
+            }
             // symbols — resolve through the compile scope. Locals get
             // a LoadLocal; captures/globals get a LoadCapture with the
             // baked Binding; anything unbound is a compile error.
@@ -391,7 +406,7 @@ impl IRSegment {
                     }
                 }
                 Ok(r)
-            },
+            }
             // cons lists: if the caller is a Special, specialize it;
             // otherwise (computed callee, regular function call, etc.)
             // escape the entire sexp to the interpreter.
@@ -405,7 +420,7 @@ impl IRSegment {
                     Value::Cons(..) => Ok(self.escape(&sexp)),
                     _ => self.specialize(sexp, scope),
                 }
-            },
+            }
 
             // tail calls: we should never see this mixed in between
             // intepreted code as long as CONTRAST never call `exec`
@@ -445,114 +460,156 @@ fn fmt_blk(f: &mut fmt::Formatter<'_>, b: usize) -> fmt::Result {
 fn fmt_stmt(f: &mut fmt::Formatter<'_>, s: &IRStatement) -> fmt::Result {
     // Mnemonic width — keep operands aligned.
     const W: usize = 7;
-    macro_rules! mn { ($m:expr) => { write!(f, "{:<width$}", $m, width = W) }; }
+    macro_rules! mn {
+        ($m:expr) => {
+            write!(f, "{:<width$}", $m, width = W)
+        };
+    }
 
     match s {
         IRStatement::Load(r, v) => {
-            mn!("ldv")?; fmt_vreg(f, r)?; write!(f, ", #{}", v)
+            mn!("ldv")?;
+            fmt_vreg(f, r)?;
+            write!(f, ", #{}", v)
         }
 
         // --- symbol resolution ---
         IRStatement::LoadLocal(r, id) => {
-            mn!("ldl")?; fmt_vreg(f, r)?; write!(f, ", ")?; fmt_local(f, id)
+            mn!("ldl")?;
+            fmt_vreg(f, r)?;
+            write!(f, ", ")?;
+            fmt_local(f, id)
         }
         IRStatement::LoadCapture(r, b) => {
-            mn!("ldc")?; fmt_vreg(f, r)?; write!(f, ", ")?; fmt_binding(f, b)
+            mn!("ldc")?;
+            fmt_vreg(f, r)?;
+            write!(f, ", ")?;
+            fmt_binding(f, b)
         }
         IRStatement::StoreLocal(id, r) => {
-            mn!("stl")?; fmt_local(f, id)?; write!(f, ", ")?; fmt_vreg(f, r)
+            mn!("stl")?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_vreg(f, r)
         }
         IRStatement::StoreCapture(b, r) => {
-            mn!("stc")?; fmt_binding(f, b)?; write!(f, ", ")?; fmt_vreg(f, r)
+            mn!("stc")?;
+            fmt_binding(f, b)?;
+            write!(f, ", ")?;
+            fmt_vreg(f, r)
         }
 
         // --- runtime scope management ---
         IRStatement::PushFrame => mn!("pushf"),
-        IRStatement::PopFrame  => mn!("popf"),
+        IRStatement::PopFrame => mn!("popf"),
         IRStatement::BindLocal { name, id, src } => {
             mn!("bnd")?;
-            fmt_local(f, id)?; write!(f, ", ")?; fmt_vreg(f, src)?;
+            fmt_local(f, id)?;
+            write!(f, ", ")?;
+            fmt_vreg(f, src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
         IRStatement::BindImmediate { name, id, src } => {
             mn!("bim")?;
-            fmt_local(f, id)?; write!(f, ", #{}", src)?;
+            fmt_local(f, id)?;
+            write!(f, ", #{}", src)?;
             write!(f, "    ; {:?}", name.as_str())
         }
 
         // --- arithmetic / bitwise / logical / compare (3-op binops) ---
-        IRStatement::Add(r,a,b)    => bin(f, "add",  r, a, b),
-        IRStatement::Sub(r,a,b)    => bin(f, "sub",  r, a, b),
-        IRStatement::Mul(r,a,b)    => bin(f, "mul",  r, a, b),
-        IRStatement::Div(r,a,b)    => bin(f, "div",  r, a, b),
-        IRStatement::Mod(r,a,b)    => bin(f, "mod",  r, a, b),
-        IRStatement::Lshift(r,a,b) => bin(f, "lsl",  r, a, b),
-        IRStatement::Rshift(r,a,b) => bin(f, "lsr",  r, a, b),
-        IRStatement::BinOr(r,a,b)  => bin(f, "bor",  r, a, b),
-        IRStatement::BinAnd(r,a,b) => bin(f, "band", r, a, b),
-        IRStatement::Xor(r,a,b)    => bin(f, "xor",  r, a, b),
-        IRStatement::Eq(r,a,b)     => bin(f, "eq",   r, a, b),
-        IRStatement::Gt(r,a,b)     => bin(f, "gt",   r, a, b),
-        IRStatement::Lt(r,a,b)     => bin(f, "lt",   r, a, b),
-        IRStatement::Gte(r,a,b)    => bin(f, "gte",  r, a, b),
-        IRStatement::Lte(r,a,b)    => bin(f, "lte",  r, a, b),
+        IRStatement::Add(r, a, b) => bin(f, "add", r, a, b),
+        IRStatement::Sub(r, a, b) => bin(f, "sub", r, a, b),
+        IRStatement::Mul(r, a, b) => bin(f, "mul", r, a, b),
+        IRStatement::Div(r, a, b) => bin(f, "div", r, a, b),
+        IRStatement::Mod(r, a, b) => bin(f, "mod", r, a, b),
+        IRStatement::Lshift(r, a, b) => bin(f, "lsl", r, a, b),
+        IRStatement::Rshift(r, a, b) => bin(f, "lsr", r, a, b),
+        IRStatement::BinOr(r, a, b) => bin(f, "bor", r, a, b),
+        IRStatement::BinAnd(r, a, b) => bin(f, "band", r, a, b),
+        IRStatement::Xor(r, a, b) => bin(f, "xor", r, a, b),
+        IRStatement::Eq(r, a, b) => bin(f, "eq", r, a, b),
+        IRStatement::Gt(r, a, b) => bin(f, "gt", r, a, b),
+        IRStatement::Lt(r, a, b) => bin(f, "lt", r, a, b),
+        IRStatement::Gte(r, a, b) => bin(f, "gte", r, a, b),
+        IRStatement::Lte(r, a, b) => bin(f, "lte", r, a, b),
 
         // --- 2-op unops ---
-        IRStatement::BinNot(r,a)     => uno(f, "bnot", r, a),
-        IRStatement::LogNot(r,a)     => uno(f, "lnot", r, a),
-        IRStatement::AsAddr(r,a)     => uno(f, "tadr", r, a),
-        IRStatement::AsSigned(r,a)   => uno(f, "tsig", r, a),
-        IRStatement::AsUnsigned(r,a) => uno(f, "tuns", r, a),
-        IRStatement::Car(r,a)        => uno(f, "car",  r, a),
-        IRStatement::Cdr(r,a)        => uno(f, "cdr",  r, a),
-        IRStatement::Nullp(r,a)      => uno(f, "null", r, a),
-        IRStatement::Array(r,a)      => uno(f, "arr",  r, a),
-        IRStatement::Unpack(r,a)     => uno(f, "unpk", r, a),
-        IRStatement::Hits(r,a)       => uno(f, "hits", r, a),
+        IRStatement::BinNot(r, a) => uno(f, "bnot", r, a),
+        IRStatement::LogNot(r, a) => uno(f, "lnot", r, a),
+        IRStatement::AsAddr(r, a) => uno(f, "tadr", r, a),
+        IRStatement::AsSigned(r, a) => uno(f, "tsig", r, a),
+        IRStatement::AsUnsigned(r, a) => uno(f, "tuns", r, a),
+        IRStatement::Car(r, a) => uno(f, "car", r, a),
+        IRStatement::Cdr(r, a) => uno(f, "cdr", r, a),
+        IRStatement::Nullp(r, a) => uno(f, "null", r, a),
+        IRStatement::Array(r, a) => uno(f, "arr", r, a),
+        IRStatement::Unpack(r, a) => uno(f, "unpk", r, a),
+        IRStatement::Hits(r, a) => uno(f, "hits", r, a),
 
         // --- cons / array ops with more operands ---
-        IRStatement::Cons(r,a,b)   => bin(f, "cons", r, a, b),
-        IRStatement::Full(r,a,b)   => bin(f, "full", r, a, b),
-        IRStatement::GetIdx(r,a,b) => bin(f, "gidx", r, a, b),
+        IRStatement::Cons(r, a, b) => bin(f, "cons", r, a, b),
+        IRStatement::Full(r, a, b) => bin(f, "full", r, a, b),
+        IRStatement::GetIdx(r, a, b) => bin(f, "gidx", r, a, b),
 
-        IRStatement::PutIdx(r,t,i,v)   => tri(f, "pidx", r, t, i, v),
-        IRStatement::ReadIdx(r,t,o,n)  => tri(f, "ridx", r, t, o, n),
-        IRStatement::FillIdx(r,t,o,l)  => tri(f, "fidx", r, t, o, l),
-        IRStatement::FullIdx(r,t,o,n,v) => qua(f, "Fidx", r, t, o, n, v),
+        IRStatement::PutIdx(r, t, i, v) => tri(f, "pidx", r, t, i, v),
+        IRStatement::ReadIdx(r, t, o, n) => tri(f, "ridx", r, t, o, n),
+        IRStatement::FillIdx(r, t, o, l) => tri(f, "fidx", r, t, o, l),
+        IRStatement::FullIdx(r, t, o, n, v) => qua(f, "Fidx", r, t, o, n, v),
 
         // --- syscalls ---
-        IRStatement::SysDsb(r)            => uno0(f, "@dsb",    r),
-        IRStatement::SysPrefetchFlush(r)  => uno0(f, "@pfflsh", r),
-        IRStatement::SysUartInit(r)       => uno0(f, "@uinit",  r),
-        IRStatement::SysUartGet8(r)       => uno0(f, "@uget8",  r),
-        IRStatement::SysClearMonitor(r)   => uno0(f, "@mclr",   r),
-        IRStatement::SysGetMonitor(r)     => uno0(f, "@mget",   r),
-        IRStatement::SysStopMonitor(r)    => uno0(f, "@mstp",   r),
+        IRStatement::SysDsb(r) => uno0(f, "@dsb", r),
+        IRStatement::SysPrefetchFlush(r) => uno0(f, "@pfflsh", r),
+        IRStatement::SysUartInit(r) => uno0(f, "@uinit", r),
+        IRStatement::SysUartGet8(r) => uno0(f, "@uget8", r),
+        IRStatement::SysClearMonitor(r) => uno0(f, "@mclr", r),
+        IRStatement::SysGetMonitor(r) => uno0(f, "@mget", r),
+        IRStatement::SysStopMonitor(r) => uno0(f, "@mstp", r),
 
-        IRStatement::SysGet32(r,a)        => uno(f, "@get32",  r, a),
-        IRStatement::SysUartPut8(r,a)     => uno(f, "@uput8",  r, a),
-        IRStatement::SysDelay(r,a)        => uno(f, "@delay",  r, a),
+        IRStatement::SysGet32(r, a) => uno(f, "@get32", r, a),
+        IRStatement::SysUartPut8(r, a) => uno(f, "@uput8", r, a),
+        IRStatement::SysDelay(r, a) => uno(f, "@delay", r, a),
 
-        IRStatement::SysPut32(r,a,b)      => bin(f, "@put32",  r, a, b),
+        IRStatement::SysPut32(r, a, b) => bin(f, "@put32", r, a, b),
 
-        IRStatement::SysZero32(r,a,b,c)   => tri(f, "@zero32", r, a, b, c),
+        IRStatement::SysZero32(r, a, b, c) => tri(f, "@zero32", r, a, b, c),
+        IRStatement::SysStr(r, a, b, c) => tri(f, "@str", r, a, b, c),
 
-        IRStatement::SysFull32(r,a,b,c,d) => qua(f, "@full32", r, a, b, c, d),
+        IRStatement::SysFull32(r, a, b, c, d) => qua(f, "@full32", r, a, b, c, d),
 
         // --- control flow ---
-        IRStatement::Br(b) => { mn!("b")?; fmt_blk(f, *b) }
-        IRStatement::CondBr { cond, then_blk, else_blk } => {
-            mn!("cbr")?; fmt_vreg(f, cond)?;
-            write!(f, ", ")?; fmt_blk(f, *then_blk)?;
-            write!(f, ", ")?; fmt_blk(f, *else_blk)
+        IRStatement::Br(b) => {
+            mn!("b")?;
+            fmt_blk(f, *b)
+        }
+        IRStatement::CondBr {
+            cond,
+            then_blk,
+            else_blk,
+        } => {
+            mn!("cbr")?;
+            fmt_vreg(f, cond)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *then_blk)?;
+            write!(f, ", ")?;
+            fmt_blk(f, *else_blk)
         }
         IRStatement::PhiOp(r, (ab, av), (bb, bv)) => {
-            mn!("phi")?; fmt_vreg(f, r)?;
-            write!(f, ", [")?; fmt_blk(f, *ab)?; write!(f, ": ")?; fmt_vreg(f, av)?;
-            write!(f, "], [")?; fmt_blk(f, *bb)?; write!(f, ": ")?; fmt_vreg(f, bv)?;
+            mn!("phi")?;
+            fmt_vreg(f, r)?;
+            write!(f, ", [")?;
+            fmt_blk(f, *ab)?;
+            write!(f, ": ")?;
+            fmt_vreg(f, av)?;
+            write!(f, "], [")?;
+            fmt_blk(f, *bb)?;
+            write!(f, ": ")?;
+            fmt_vreg(f, bv)?;
             write!(f, "]")
         }
-        IRStatement::Ret(r) => { mn!("ret")?; fmt_vreg(f, r) }
+        IRStatement::Ret(r) => {
+            mn!("ret")?;
+            fmt_vreg(f, r)
+        }
 
         // --- call ---
         IRStatement::Call { dst, callee, args } => {
@@ -579,31 +636,49 @@ fn uno0(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg) -> fmt::Result {
 
 fn uno(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg) -> fmt::Result {
     write!(f, "{:<7}", m)?;
-    fmt_vreg(f, r)?; write!(f, ", ")?;
+    fmt_vreg(f, r)?;
+    write!(f, ", ")?;
     fmt_vreg(f, a)
 }
 
 fn bin(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg) -> fmt::Result {
     write!(f, "{:<7}", m)?;
-    fmt_vreg(f, r)?; write!(f, ", ")?;
-    fmt_vreg(f, a)?; write!(f, ", ")?;
+    fmt_vreg(f, r)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, a)?;
+    write!(f, ", ")?;
     fmt_vreg(f, b)
 }
 
 fn tri(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg, c: &VReg) -> fmt::Result {
     write!(f, "{:<7}", m)?;
-    fmt_vreg(f, r)?; write!(f, ", ")?;
-    fmt_vreg(f, a)?; write!(f, ", ")?;
-    fmt_vreg(f, b)?; write!(f, ", ")?;
+    fmt_vreg(f, r)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, a)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, b)?;
+    write!(f, ", ")?;
     fmt_vreg(f, c)
 }
 
-fn qua(f: &mut fmt::Formatter<'_>, m: &str, r: &VReg, a: &VReg, b: &VReg, c: &VReg, d: &VReg) -> fmt::Result {
+fn qua(
+    f: &mut fmt::Formatter<'_>,
+    m: &str,
+    r: &VReg,
+    a: &VReg,
+    b: &VReg,
+    c: &VReg,
+    d: &VReg,
+) -> fmt::Result {
     write!(f, "{:<7}", m)?;
-    fmt_vreg(f, r)?; write!(f, ", ")?;
-    fmt_vreg(f, a)?; write!(f, ", ")?;
-    fmt_vreg(f, b)?; write!(f, ", ")?;
-    fmt_vreg(f, c)?; write!(f, ", ")?;
+    fmt_vreg(f, r)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, a)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, b)?;
+    write!(f, ", ")?;
+    fmt_vreg(f, c)?;
+    write!(f, ", ")?;
     fmt_vreg(f, d)
 }
 

@@ -138,12 +138,8 @@ fn parse_unsigned(input: &str) -> IResult<&str, Value> {
             nom::error::ErrorKind::Digit,
         )));
     }
-    let make_err = || {
-        nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Digit,
-        ))
-    };
+    let make_err =
+        || nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit));
     let (rest, val) = if rest.starts_with("0x") || rest.starts_with("0X") {
         let r = &rest[2..];
         let (r, digits) = hex_digit1(r)?;
@@ -259,10 +255,7 @@ fn parse_syscall(input: &str) -> IResult<&str, Value> {
 
 /// Wrap `inner` as `(head inner)`.
 fn wrap_special(head: Special, inner: Value) -> Value {
-    Value::cons(
-        Value::Special(head),
-        Value::cons(inner, Value::Nil),
-    )
+    Value::cons(Value::Special(head), Value::cons(inner, Value::Nil))
 }
 
 /// Parse 'expr — desugars to (quote expr). Returns expr literally, unevaluated.
